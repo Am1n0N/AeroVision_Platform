@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import {Database, FileStack, Plus} from "lucide-react";
+import {Database, FileStack, Plus, TestTube} from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
 export const Sidebar = () => {
@@ -23,6 +23,11 @@ export const Sidebar = () => {
             icon: Database,
             href: "/data",
             label: "Data",
+        },
+         {
+            icon: TestTube,
+            href: "/Evaluation",
+            label: "Evaluation",
         },
     ];
 

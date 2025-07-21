@@ -1,0 +1,29 @@
+{
+  "summary": {
+    "total": 10,
+    "succeeded": 10,
+    "success_rate": 1,
+    "avg_overall": 3,
+    "avg_time": 23.98297806
+  },
+  "metrics": {
+    "relevance": {
+      "mean": 3
+    },
+    "clarity": {
+      "mean": 3
+    },
+    "coherence": {
+      "mean": 3
+    },
+    "completeness": {
+      "mean": 3
+    },
+    "accuracy": {
+      "mean": 3
+    },
+    "helpfulness": {
+      "mean": 3
+    }
+  }
+}

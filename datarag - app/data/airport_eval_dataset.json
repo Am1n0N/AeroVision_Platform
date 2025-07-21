@@ -1,0 +1,42 @@
+[
+  {
+    "input": "What is the ICAO code for Tozeur–Nefta International Airport?",
+    "expected_output": "DTTZ"
+  },
+  {
+    "input": "Give the declared length of runway 11/29 at Tozeur–Nefta.",
+    "expected_output": "3 100 m (10 171 ft)"
+  },
+  {
+    "input": "Which VHF frequency should be used to contact Tozeur Tower?",
+    "expected_output": "118.100 MHz"
+  },
+  {
+    "input": "State the airport elevation published for DTTZ.",
+    "expected_output": "282 ft / 86 m above mean sea level"
+  },
+  {
+    "input": "What rescue and fire‑fighting category is normally available at Tozeur–Nefta?",
+    "expected_output": "Category 6 (CAT VI)"
+  },
+  {
+    "input": "Identify the on‑field VOR/DME and give its frequency.",
+    "expected_output": "TZR VOR/DME, 112.30 MHz"
+  },
+  {
+    "input": "For the SID from runway 11, what is the initial climb altitude before any turn?",
+    "expected_output": "5 000 ft"
+  },
+  {
+    "input": "List the standard taxi routing time from apron A to threshold 29.",
+    "expected_output": "≈ 6 minutes under normal traffic"
+  },
+  {
+    "input": "Give the visibility and cloud‑ceiling minima for daytime VFR inside the Tozeur control zone.",
+    "expected_output": "Visibility ≥ 5 km, cloud base ≥ 1 500 ft AGL"
+  },
+  {
+    "input": "What is the magnetic bearing of runway 29’s centre‑line?",
+    "expected_output": "289 ° M"
+  }
+]
