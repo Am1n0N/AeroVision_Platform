@@ -1,4 +1,3 @@
-// app/api/evaluate/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { Readable } from 'stream';
 import { Ollama } from 'ollama';
@@ -28,6 +27,7 @@ interface GenerationResult {
   content: string;
   time: number;
   memDelta: number;
+  sources?: string[]; // For RAG responses
 }
 
 interface EvaluationResult {
@@ -47,6 +47,11 @@ interface EvaluationResult {
   errors?: string[];
 }
 
+interface RAGConfig {
+  useKnowledgeBase: boolean;
+  maxKnowledgeResults?: number;
+}
+
 class OllamaEvaluator {
   private cache = new Map<string, EvaluationMetrics>();
   private readonly MAX_RETRIES = 3;
@@ -55,6 +60,7 @@ class OllamaEvaluator {
   constructor(
     private modelName: string,
     private judgeModel: string,
+    private ragConfig?: RAGConfig,
     private ollama = new Ollama({ host: 'http://localhost:11434' })
   ) {}
 
@@ -93,33 +99,84 @@ class OllamaEvaluator {
       const memBefore = process.memoryUsage().rss / 1024 ** 2;
       const t0 = performance.now();
 
-      const res = await this.ollama.chat({
-        model: this.modelName,
-        messages: [{ role: 'user', content: prompt.trim() }],
-        options: {
-          temperature: 0.3,
-          top_p: 0.9,
-          num_predict: 2048, // Limit response length
-        },
-      });
+      let content: string;
+      let sources: string[] | undefined;
+
+      if (this.ragConfig?.useKnowledgeBase) {
+        // Use RAG-enhanced chat endpoint
+        const ragResponse = await this.generateRAGResponse(prompt.trim());
+        content = ragResponse.content;
+        sources = ragResponse.sources;
+      } else {
+        // Use direct Ollama chat
+        const res = await this.ollama.chat({
+          model: this.modelName,
+          messages: [{ role: 'user', content: prompt.trim() }],
+          options: {
+            temperature: 0.3,
+            top_p: 0.9,
+            num_predict: 2048, // Limit response length
+          },
+        });
+
+        if (!res?.message?.content) {
+          throw new Error('Empty response from model');
+        }
+
+        content = res.message.content.trim();
+      }
 
       const time = (performance.now() - t0) / 1000;
       const memAfter = process.memoryUsage().rss / 1024 ** 2;
 
-      if (!res?.message?.content) {
-        throw new Error('Empty response from model');
+      return {
+        content,
+        time,
+        memDelta: Math.max(0, memAfter - memBefore), // Ensure non-negative
+        sources
+      };
+    }, `Generate response for model ${this.modelName}${this.ragConfig?.useKnowledgeBase ? ' (RAG-enhanced)' : ''}`);
+  }
+
+  private async generateRAGResponse(prompt: string): Promise<{ content: string; sources?: string[] }> {
+    try {
+      const response = await fetch('http://localhost:3000/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          prompt: prompt,
+          model: this.modelName,
+          useKnowledgeBase: this.ragConfig?.useKnowledgeBase || true,
+          maxKnowledgeResults: this.ragConfig?.maxKnowledgeResults || 5
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`RAG API responded with status: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (!data?.response) {
+        throw new Error('Empty response from RAG API');
       }
 
       return {
-        content: res.message.content.trim(),
-        time,
-        memDelta: Math.max(0, memAfter - memBefore) // Ensure non-negative
+        content: data.response,
+        sources: data.sources || []
       };
-    }, `Generate response for model ${this.modelName}`);
+    } catch (error) {
+      throw new Error(`RAG API call failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
-  private createJudgePrompt(query: string, response: string, expected: string): string {
+  private createJudgePrompt(query: string, response: string, expected: string, sources?: string[]): string {
     const expectedSection = expected ? `\nExpected Output: """${expected}"""` : '';
+    const sourcesSection = sources && sources.length > 0
+      ? `\nSources Used: ${sources.join(', ')}`
+      : '';
 
     return `You are an expert evaluator. Evaluate the response based on the following criteria:
 
@@ -127,6 +184,8 @@ class OllamaEvaluator {
 2. Clarity (20%): How clear and understandable is the response?
 3. Coherence (15%): How logically structured and consistent is the response?
 4. Completeness (25%): How thoroughly does the response cover the topic?
+
+${sources && sources.length > 0 ? 'Note: This response was generated using additional knowledge sources.' : ''}
 
 Rate each criterion on a scale of 0-100, then calculate the weighted overall score.
 
@@ -139,7 +198,7 @@ Return ONLY a valid JSON object in this exact format:
   "overall_score": <number>
 }
 
-Query: """${query}"""${expectedSection}
+Query: """${query}"""${expectedSection}${sourcesSection}
 Response to Evaluate: """${response}"""`;
   }
 
@@ -167,15 +226,16 @@ Response to Evaluate: """${response}"""`;
     }
   }
 
-  async evaluateWithJudge(query: string, response: string, expected = ''): Promise<EvaluationMetrics> {
-    const key = `${query}|${response}|${expected}`;
+  async evaluateWithJudge(query: string, response: string, expected = '', sources?: string[]): Promise<EvaluationMetrics> {
+    const sourcesKey = sources ? sources.join('|') : '';
+    const key = `${query}|${response}|${expected}|${sourcesKey}`;
 
     if (this.cache.has(key)) {
       return this.cache.get(key)!;
     }
 
     const result = await this.withRetry(async () => {
-      const prompt = this.createJudgePrompt(query, response, expected);
+      const prompt = this.createJudgePrompt(query, response, expected, sources);
 
       const res = await this.ollama.chat({
         model: this.judgeModel,
@@ -249,7 +309,13 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { model, judge, datasetPath } = body;
+    const {
+      model,
+      judge,
+      datasetPath,
+      useKnowledgeBase = false,
+      maxKnowledgeResults = 5
+    } = body;
 
     // Validate required parameters
     if (!model || typeof model !== 'string') {
@@ -264,13 +330,27 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Dataset path is required and must be a string' }, { status: 400 });
     }
 
+    // Validate RAG parameters
+    if (typeof useKnowledgeBase !== 'boolean') {
+      return NextResponse.json({ error: 'useKnowledgeBase must be a boolean' }, { status: 400 });
+    }
+
+    if (typeof maxKnowledgeResults !== 'number' || maxKnowledgeResults < 1 || maxKnowledgeResults > 20) {
+      return NextResponse.json({ error: 'maxKnowledgeResults must be a number between 1 and 20' }, { status: 400 });
+    }
+
     // Load and validate dataset
     const dataset = await loadDataset(datasetPath);
 
     // Create SSE stream
     sse = createSSEStream();
 
-    const evaluator = new OllamaEvaluator(model, judge);
+    const ragConfig: RAGConfig = {
+      useKnowledgeBase,
+      maxKnowledgeResults
+    };
+
+    const evaluator = new OllamaEvaluator(model, judge, ragConfig);
     const total = dataset.length;
     const errors: string[] = [];
 
@@ -281,6 +361,13 @@ export async function POST(req: NextRequest) {
         let sumTime = 0, sumMem = 0;
         let validCount = 0;
         let processedCount = 0;
+
+        // Send initial status
+        sse.push(`event: start\ndata: ${JSON.stringify({
+          total,
+          useRAG: useKnowledgeBase,
+          maxKnowledgeResults: useKnowledgeBase ? maxKnowledgeResults : null
+        })}\n\n`);
 
         for (let i = 0; i < total; i++) {
           try {
@@ -295,11 +382,16 @@ export async function POST(req: NextRequest) {
             const query = item.input.trim();
             const expected = item.expected_output?.trim() || '';
 
-            // Generate response
+            // Generate response (either direct Ollama or RAG-enhanced)
             const generation = await evaluator.generateResponse(query);
 
             // Evaluate with judge
-            const evaluation = await evaluator.evaluateWithJudge(query, generation.content, expected);
+            const evaluation = await evaluator.evaluateWithJudge(
+              query,
+              generation.content,
+              expected,
+              generation.sources
+            );
 
             // Accumulate metrics
             sumRel += evaluation.relevance;
@@ -310,6 +402,15 @@ export async function POST(req: NextRequest) {
             sumTime += generation.time;
             sumMem += generation.memDelta;
             validCount++;
+
+            // Send item completion update
+            sse.push(`event: item\ndata: ${JSON.stringify({
+              index: i,
+              query: query.substring(0, 100) + (query.length > 100 ? '...' : ''),
+              score: evaluation.overall_score,
+              time: generation.time,
+              sources: generation.sources?.length || 0
+            })}\n\n`);
 
           } catch (error) {
             const errorMsg = error instanceof Error ? error.message : 'Unknown error';
@@ -340,7 +441,7 @@ export async function POST(req: NextRequest) {
         const successRate = parseFloat(((validCount / total) * 100).toFixed(2));
 
         const result: EvaluationResult = {
-          message: 'Evaluation completed successfully.',
+          message: `Evaluation completed successfully${useKnowledgeBase ? ' with RAG enhancement' : ''}.`,
           output: {
             Relevance: avg(sumRel),
             Clarity: avg(sumCl),

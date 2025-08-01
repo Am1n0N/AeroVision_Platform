@@ -3,40 +3,100 @@
     "input": "What is the ICAO code for Tozeur–Nefta International Airport?",
     "expected_output": "DTTZ"
   },
-  {
-    "input": "Give the declared length of runway 11/29 at Tozeur–Nefta.",
-    "expected_output": "3 100 m (10 171 ft)"
+    {
+    "input": "What transponder code should pilots squawk in case of radio communication failure?",
+    "expected_output": "7600"
   },
   {
-    "input": "Which VHF frequency should be used to contact Tozeur Tower?",
-    "expected_output": "118.100 MHz"
+    "input": "How frequently are runway friction tests recommended by ICAO for certain traffic levels?",
+    "expected_output": "Every six months"
   },
   {
-    "input": "State the airport elevation published for DTTZ.",
-    "expected_output": "282 ft / 86 m above mean sea level"
+    "input": "What practice involves systematically walking sections of the runway to collect debris?",
+    "expected_output": "FOD walks"
   },
   {
-    "input": "What rescue and fire‑fighting category is normally available at Tozeur–Nefta?",
-    "expected_output": "Category 6 (CAT VI)"
+    "input": "Which code is assigned to runway surface segments under the Global Reporting Format?",
+    "expected_output": "Runway Condition Code (RCC)"
   },
   {
-    "input": "Identify the on‑field VOR/DME and give its frequency.",
-    "expected_output": "TZR VOR/DME, 112.30 MHz"
+    "input": "What technology allows airports to assess runway pavement layers without excavation?",
+    "expected_output": "Ground-penetrating radar"
   },
   {
-    "input": "For the SID from runway 11, what is the initial climb altitude before any turn?",
-    "expected_output": "5 000 ft"
+    "input": "What minimum ICAO English proficiency level must controllers demonstrate for international operations?",
+    "expected_output": "ICAO Level 4"
   },
   {
-    "input": "List the standard taxi routing time from apron A to threshold 29.",
-    "expected_output": "≈ 6 minutes under normal traffic"
+    "input": "Which ministerial decision governs air supervision and handling services for foreign airlines in Tunisia?",
+    "expected_output": "Decision of the Minister of Transport No. 67 of 12 March 2018"
   },
   {
-    "input": "Give the visibility and cloud‑ceiling minima for daytime VFR inside the Tozeur control zone.",
-    "expected_output": "Visibility ≥ 5 km, cloud base ≥ 1 500 ft AGL"
+    "input": "What bird hazard mitigation methods are used at Tunisian airports?",
+    "expected_output": "Habitat modification and bird-scaring devices (propane cannons, distress call systems)"
   },
   {
-    "input": "What is the magnetic bearing of runway 29’s centre‑line?",
-    "expected_output": "289 ° M"
+    "input": "What is the key goal of runway geometry upkeep regarding drainage?",
+    "expected_output": "Ensuring good drainage to prevent standing water and hydroplaning"
+  },
+  {
+    "input": "Which equipment can detect microscopic explosive residues on passengers or baggage?",
+    "expected_output": "Explosive Trace Detection (ETD) equipment"
+  },
+    {
+    "input": "What is the ICAO code for Tozeur–Nefta International Airport?",
+    "expected_output": "DTTZ"
+  },
+  {
+    "input": "What compliance score did Tunisia achieve in the recent ICAO security audit?",
+    "expected_output": "82%"
+  },
+  {
+    "input": "Under which ICAO Annex do Tunisian aviation security regulations align?",
+    "expected_output": "ICAO Annex 17 (Security)"
+  },
+  {
+    "input": "What is the maximum volume allowed for liquids in carry-on baggage?",
+    "expected_output": "100 ml"
+  },
+  {
+    "input": "What are the dimensions of the transparent plastic bag required for liquids in carry-on baggage?",
+    "expected_output": "20×20 cm"
+  },
+  {
+    "input": "Which office oversees airport security implementation and compliance in Tunisia?",
+    "expected_output": "Office of Civil Aviation and Airports (OACA)"
+  },
+  {
+    "input": "What percentage of hold baggage screening is required by ICAO and national regulations?",
+    "expected_output": "100% screening of hold baggage"
+  },
+  {
+    "input": "Are unaccompanied baggage allowed to travel on Tunisian airports?",
+    "expected_output": "Unaccompanied baggage is not allowed to travel."
+  },
+  {
+    "input": "What is the primary language used for ATC communication in international flights in Tunisia?",
+    "expected_output": "English"
+  },
+  {
+    "input": "What phraseology are pilots and controllers trained to use for ATC communications?",
+    "expected_output": "ICAO standard phraseology"
+  },
+  {
+    "input": "What is the ICAO code for Tunis–Carthage International Airport?",
+    "expected_output": "DTTA"
+  },
+  {
+    "input": "What is the ICAO code for Enfidha–Hammamet International Airport?",
+    "expected_output": "DTNH"
+  },
+  {
+    "input": "What is the ICAO code for Sfax–Thyna International Airport?",
+    "expected_output": "DTTX"
+  },
+  {
+    "input": "What is the ICAO code for Djerba–Zarzis International Airport?",
+    "expected_output": "DTTJ"
   }
 ]

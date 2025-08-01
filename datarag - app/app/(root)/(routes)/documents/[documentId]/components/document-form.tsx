@@ -12,7 +12,7 @@ import { useForm } from "react-hook-form";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { Cross, Trash, Wand2 } from "lucide-react";
+import { Cross, Trash, Wand2, Database } from "lucide-react";
 import FileUpload from "@/components/file-upload";
 import PDFViewer from "@/components/pdfviewer";
 import { useState } from "react";
@@ -33,8 +33,39 @@ const formSchema = z.object({
     fileurl: z.any().refine((value) => value instanceof File || value === null, {
         message: "File is required",
     }),
+    addToKnowledgeBase: z.boolean().default(true),
 });
 
+// Helper function to extract text from PDF
+const extractTextFromPDF = async (file: File): Promise<string> => {
+    try {
+        // Using PDF.js to extract text - you'll need to install pdfjs-dist
+        const pdfjsLib = await import('pdfjs-dist');
+
+        // Set up the worker
+        pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+        let fullText = '';
+
+        // Extract text from each page
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items
+                .map((item: any) => item.str)
+                .join(' ');
+            fullText += pageText + '\n';
+        }
+
+        return fullText.trim();
+    } catch (error) {
+        console.error('Error extracting text from PDF:', error);
+        throw new Error('Failed to extract text from PDF');
+    }
+};
 
 export const DocumentForm = ({
     initialData,
@@ -48,7 +79,8 @@ export const DocumentForm = ({
             title: "",
             description: "",
             categoryId: undefined,
-            fileurl: undefined
+            fileurl: undefined,
+            addToKnowledgeBase: true,
         }
     })
 
@@ -56,12 +88,57 @@ export const DocumentForm = ({
     const [file, setFile] = useState(null);
     const { edgestore } = useEdgeStore();
     const [progress, setProgress] = useState(0);
+    const [kbProgress, setKbProgress] = useState(0);
 
     const [url, setUrl] = useState<string>(initialData?.fileurl || "");
 
+    const addToKnowledgeBase = async (documentData: any, fileUrl: string, extractedText: string) => {
+        try {
+            setKbProgress(25);
+
+            const selectedCategory = categories.find(cat => cat.id === documentData.categoryId);
+
+            const knowledgeData = {
+                content: extractedText,
+                title: documentData.title,
+                category: selectedCategory?.name || 'general',
+                source: 'document_upload',
+                tags: [
+                    'document',
+                    selectedCategory?.name || 'general',
+                    'pdf'
+                ]
+            };
+
+            setKbProgress(50);
+
+            const response = await axios.post('/api/knowledge', knowledgeData);
+
+            setKbProgress(100);
+
+            if (response.status === 200) {
+                toast({
+                    description: "Document added to knowledge base successfully!",
+                });
+            }
+        } catch (error) {
+            console.error('Error adding to knowledge base:', error);
+            toast({
+                variant: "destructive",
+                description: "Document saved but failed to add to knowledge base. You can try again later.",
+            });
+        } finally {
+            setKbProgress(0);
+        }
+    };
+
     const onSubmit = async (values: z.infer<typeof formSchema>) => {
         try {
+            let fileUrl = url;
+            let extractedText = '';
+
             if (file) {
+                // Upload file to EdgeStore
                 const res = await edgestore.MyDocuments.upload({
                     file,
                     onProgressChange: (progress) => {
@@ -69,26 +146,66 @@ export const DocumentForm = ({
                     }
                 });
                 setUrl(res.url);
-
+                fileUrl = res.url;
                 values.fileurl = res.url;
+
+                // Extract text from PDF if addToKnowledgeBase is enabled
+                if (values.addToKnowledgeBase && file.type === 'application/pdf') {
+                    try {
+                        toast({
+                            description: "Extracting text from PDF...",
+                        });
+                        extractedText = await extractTextFromPDF(file);
+                    } catch (error) {
+                        console.error('Text extraction failed:', error);
+                        toast({
+                            variant: "destructive",
+                            description: "Failed to extract text from PDF. Document will be saved without adding to knowledge base.",
+                        });
+                        values.addToKnowledgeBase = false;
+                    }
+                }
             }
 
+            // Save document to database
+            let documentResponse;
             if (initialData) {
                 // Update the document
-                await axios.patch(`/api/document/${initialData.id}`, values);
+                documentResponse = await axios.patch(`/api/document/${initialData.id}`, {
+                    title: values.title,
+                    description: values.description,
+                    categoryId: values.categoryId,
+                    fileurl: values.fileurl
+                });
             } else {
                 // Create a new document
-                await axios.post("/api/document", values);
+                documentResponse = await axios.post("/api/document", {
+                    title: values.title,
+                    description: values.description,
+                    categoryId: values.categoryId,
+                    fileurl: values.fileurl
+                });
             }
 
             toast({
                 description: "Document has been saved successfully.",
             });
 
+            // Add to knowledge base if enabled and we have extracted text
+            if (values.addToKnowledgeBase && extractedText && extractedText.length > 0) {
+                await addToKnowledgeBase(values, fileUrl, extractedText);
+            } else if (values.addToKnowledgeBase && (!extractedText || extractedText.length === 0)) {
+                toast({
+                    variant: "destructive",
+                    description: "Document saved but no text could be extracted for knowledge base.",
+                });
+            }
+
             router.refresh();
             router.push('/');
 
         } catch (error) {
+            console.error('Error in form submission:', error);
             toast({
                 variant: "destructive",
                 description: "Something went wrong. Please try again later.",
@@ -138,8 +255,7 @@ export const DocumentForm = ({
                                             <FormItem>
                                                 <FormLabel>Description</FormLabel>
                                                 <FormControl>
-                                                    <Input disabled={isLoading} placeholder="
-                                                    Business statements and analytic overview" {...field} />
+                                                    <Input disabled={isLoading} placeholder="Business statements and analytic overview" {...field} />
                                                 </FormControl>
                                                 <FormDescription>
                                                     Provide a brief description of the document content
@@ -173,8 +289,8 @@ export const DocumentForm = ({
                                             </FormItem>
                                         )}
                                     />
-
                                 </div>
+
                                 <div className="pt-5">
                                     <h3 className="text-lg font-medium">
                                         Document
@@ -184,6 +300,7 @@ export const DocumentForm = ({
                                     </p>
                                 </div>
                                 <Separator className="bg-primary/10" />
+
                                 <FormField
                                     name="fileurl"
                                     control={form.control}
@@ -212,6 +329,33 @@ export const DocumentForm = ({
                                         </FormItem>
                                     )}
                                 />
+
+                                <FormField
+                                    control={form.control}
+                                    name="addToKnowledgeBase"
+                                    render={({ field }) => (
+                                        <FormItem className="rounded-md border p-4">
+                                            <div className="flex items-center space-x-2">
+                                                <FormControl>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={field.value}
+                                                        onChange={(e) => field.onChange(e.target.checked)}
+                                                        disabled={isLoading}
+                                                        className="w-4 h-4 text-primary bg-background border-gray-300 rounded focus:ring-primary focus:ring-2"
+                                                    />
+                                                </FormControl>
+                                                <FormLabel className="flex items-center gap-2 cursor-pointer">
+                                                    <Database className="w-4 h-4" />
+                                                    Add to Knowledge Base
+                                                </FormLabel>
+                                            </div>
+                                            <FormDescription className="mt-2">
+                                                Automatically extract text from the PDF and add it to the knowledge base for AI-powered search and retrieval. Only works with PDF files.
+                                            </FormDescription>
+                                        </FormItem>
+                                    )}
+                                />
                             </div>
 
                             <div className="w-full flex justify-center">
@@ -228,8 +372,20 @@ export const DocumentForm = ({
                                 </Button>
                             </div>
                         </form>
-                        <div className="h-[6px] w-full border rounded overflow-hidden">
-                            <div className="h-full bg-primary transition-all duration-150" style={{ width: `${progress}%` }} />
+
+                        {/* Progress bars */}
+                        <div className="space-y-2">
+                            <div className="h-[6px] w-full border rounded overflow-hidden">
+                                <div className="h-full bg-primary transition-all duration-150" style={{ width: `${progress}%` }} />
+                            </div>
+                            {kbProgress > 0 && (
+                                <div className="space-y-1">
+                                    <p className="text-sm text-muted-foreground">Adding to knowledge base...</p>
+                                    <div className="h-[6px] w-full border rounded overflow-hidden">
+                                        <div className="h-full bg-green-500 transition-all duration-150" style={{ width: `${kbProgress}%` }} />
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </Form>
                 </div>

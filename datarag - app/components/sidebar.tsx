@@ -26,8 +26,8 @@ export const Sidebar = () => {
         },
          {
             icon: TestTube,
-            href: "/Evaluation",
-            label: "Evaluation",
+            href: "/test",
+            label: "Test",
         },
     ];
 
