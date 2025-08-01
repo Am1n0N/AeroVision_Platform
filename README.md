@@ -73,9 +73,7 @@ flowchart LR
 
   ELT --> WebApp
   WebApp -->|Use Data| BI[BI / Reporting]
-
-
----
+```
 
 ## Tech Stack
 
