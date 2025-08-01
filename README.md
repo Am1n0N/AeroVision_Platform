@@ -1,4 +1,4 @@
-````markdown
+
 # AirportRAG – ELT & Retrieval-Augmented Web App
 
 An end-to-end pipeline combining:
@@ -73,7 +73,7 @@ flowchart LR
 
   ELT --> WebApp
   WebApp -->|Use Data| BI[BI / Reporting]
-````
+
 
 ---
 
