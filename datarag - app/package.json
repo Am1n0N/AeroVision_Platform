@@ -46,6 +46,7 @@
     "langchain": "^0.3.29",
     "lucide-react": "^0.323.0",
     "md5": "^2.3.0",
+    "mysql2": "^3.14.3",
     "next": "14.2.25",
     "next-themes": "^0.2.1",
     "pdf-parse": "^1.1.1",
@@ -58,9 +59,10 @@
     "react-markdown": "^10.1.0",
     "react-pdf": "^7.7.1",
     "react-spinners": "^0.13.8",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^2.2.1",
     "tailwindcss-animate": "^1.0.7",
-    "zod": "^3.22.4"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/md5": "^2.3.5",

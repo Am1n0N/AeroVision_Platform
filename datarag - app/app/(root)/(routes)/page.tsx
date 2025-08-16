@@ -1,7 +1,6 @@
 import { Categories } from "@/components/categories";
 import { Documents } from "@/components/documents";
 import { SearchInput } from "@/components/search-input";
-import { FloatingChatbot } from "@/components/floatingchatbot";
 import prismadb from "@/lib/prismadb";
 
 interface RootPageProps {
@@ -32,8 +31,6 @@ const RootPage = async ({
       <SearchInput/>
       <Categories data={categories} />
       <Documents data={documents} displayMode={searchParams.displayMode}/>
-      <FloatingChatbot />
-
     </div>
   )
 }

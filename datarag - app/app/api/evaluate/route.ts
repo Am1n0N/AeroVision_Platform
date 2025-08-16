@@ -27,6 +27,12 @@ interface GenerationResult {
   content: string;
   time: number;
   memDelta: number;
+  memDetails?: {
+    rss: number;
+    heap: number;
+    external: number;
+    peak: number;
+  };
   sources?: string[]; // For RAG responses
 }
 
@@ -62,7 +68,7 @@ class OllamaEvaluator {
     private judgeModel: string,
     private ragConfig?: RAGConfig,
     private ollama = new Ollama({ host: 'http://localhost:11434' })
-  ) {}
+  ) { }
 
   private async delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -90,51 +96,107 @@ class OllamaEvaluator {
     throw new Error(`${context} failed after ${this.MAX_RETRIES} attempts: ${lastError!.message}`);
   }
 
+  private forceGarbageCollection(): void {
+    if (global.gc) {
+      try {
+        global.gc();
+      } catch (error) {
+        // Ignore GC errors
+      }
+    }
+  }
+
   async generateResponse(prompt: string): Promise<GenerationResult> {
     if (!prompt?.trim()) {
       throw new Error('Prompt cannot be empty');
     }
 
     return this.withRetry(async () => {
-      const memBefore = process.memoryUsage().rss / 1024 ** 2;
+      // Force garbage collection and wait for it to complete
+      this.forceGarbageCollection();
+      await this.delay(100);
+
+      const memBefore = process.memoryUsage();
+      let peakMemory = memBefore.heapUsed;
       const t0 = performance.now();
 
-      let content: string;
-      let sources: string[] | undefined;
+      // Monitor memory during operation
+      const memoryMonitor = setInterval(() => {
+        const currentMem = process.memoryUsage().heapUsed;
+        peakMemory = Math.max(peakMemory, currentMem);
+      }, 50); // Check every 50ms
 
-      if (this.ragConfig?.useKnowledgeBase) {
-        // Use RAG-enhanced chat endpoint
-        const ragResponse = await this.generateRAGResponse(prompt.trim());
-        content = ragResponse.content;
-        sources = ragResponse.sources;
-      } else {
-        // Use direct Ollama chat
-        const res = await this.ollama.chat({
-          model: this.modelName,
-          messages: [{ role: 'user', content: prompt.trim() }],
-          options: {
-            temperature: 0.3,
-            top_p: 0.9,
-            num_predict: 2048, // Limit response length
-          },
-        });
+      try {
+        let content: string;
+        let sources: string[] | undefined;
 
-        if (!res?.message?.content) {
-          throw new Error('Empty response from model');
+        if (this.ragConfig?.useKnowledgeBase) {
+          // Use RAG-enhanced chat endpoint
+          const ragResponse = await this.generateRAGResponse(prompt.trim());
+          content = ragResponse.content;
+          sources = ragResponse.sources;
+        } else {
+          // Use direct Ollama chat
+          const res = await this.ollama.chat({
+            model: this.modelName,
+            messages: [{ role: 'user', content: prompt.trim() }],
+            options: {
+              temperature: 0.3,
+              top_p: 0.9,
+              num_predict: 2048, // Limit response length
+            },
+          });
+
+          if (!res?.message?.content) {
+            throw new Error('Empty response from model');
+          }
+
+          content = res.message.content.trim();
         }
 
-        content = res.message.content.trim();
+        const time = (performance.now() - t0) / 1000;
+
+        // Clear memory monitor
+        clearInterval(memoryMonitor);
+
+        // Force garbage collection after operation
+        this.forceGarbageCollection();
+        await this.delay(100);
+
+        const memAfter = process.memoryUsage();
+
+        // Calculate various memory deltas
+        const memDeltas = {
+          rss: (memAfter.rss - memBefore.rss) / 1024 ** 2,
+          heap: (memAfter.heapUsed - memBefore.heapUsed) / 1024 ** 2,
+          external: (memAfter.external - memBefore.external) / 1024 ** 2,
+          peak: (peakMemory - memBefore.heapUsed) / 1024 ** 2
+        };
+
+        // Use the most significant positive memory change, fallback to peak usage
+        let memDelta = Math.max(
+          memDeltas.heap > 0 ? memDeltas.heap : 0,
+          memDeltas.peak > 0 ? memDeltas.peak : 0,
+          memDeltas.rss > 0 ? memDeltas.rss * 0.1 : 0, // RSS weighted lower
+          0.001 // Minimum non-zero value to show some activity
+        );
+
+        return {
+          content,
+          time,
+          memDelta: parseFloat(memDelta.toFixed(3)),
+          memDetails: {
+            rss: parseFloat(memDeltas.rss.toFixed(3)),
+            heap: parseFloat(memDeltas.heap.toFixed(3)),
+            external: parseFloat(memDeltas.external.toFixed(3)),
+            peak: parseFloat(memDeltas.peak.toFixed(3))
+          },
+          sources
+        };
+      } catch (error) {
+        clearInterval(memoryMonitor);
+        throw error;
       }
-
-      const time = (performance.now() - t0) / 1000;
-      const memAfter = process.memoryUsage().rss / 1024 ** 2;
-
-      return {
-        content,
-        time,
-        memDelta: Math.max(0, memAfter - memBefore), // Ensure non-negative
-        sources
-      };
     }, `Generate response for model ${this.modelName}${this.ragConfig?.useKnowledgeBase ? ' (RAG-enhanced)' : ''}`);
   }
 
@@ -187,7 +249,7 @@ class OllamaEvaluator {
 
 ${sources && sources.length > 0 ? 'Note: This response was generated using additional knowledge sources.' : ''}
 
-Rate each criterion on a scale of 0-100, then calculate the weighted overall score.
+Rate each criterion on a scale of 0 to 5, then calculate the weighted overall score.
 
 Return ONLY a valid JSON object in this exact format:
 {
@@ -204,19 +266,20 @@ Response to Evaluate: """${response}"""`;
 
   private parseJudgeResponse(content: string): EvaluationMetrics {
     try {
-      // Try to extract JSON from the response
-      const jsonMatch = content.match(/\{[\s\S]*?\}/);
+      // Strip <think>...</think> if it exists
+      const sanitized = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+      const jsonMatch = sanitized.match(/\{[\s\S]*?\}/);
       if (!jsonMatch) {
-        throw new Error('No JSON found in judge response');
+        throw new Error(`No JSON found in judge response:\n--- RAW START ---\n${content}\n--- RAW END ---`);
       }
 
       const parsed = JSON.parse(jsonMatch[0]);
 
-      // Validate required fields
       const required = ['relevance', 'clarity', 'coherence', 'completeness', 'overall_score'];
       for (const field of required) {
-        if (typeof parsed[field] !== 'number' || parsed[field] < 0 || parsed[field] > 100) {
-          throw new Error(`Invalid ${field}: must be a number between 0-100`);
+        if (typeof parsed[field] !== 'number' || parsed[field] < 0 || parsed[field] > 5) {
+          throw new Error(`Invalid ${field}: must be a number between 0 and 5`);
         }
       }
 
@@ -225,6 +288,7 @@ Response to Evaluate: """${response}"""`;
       throw new Error(`Failed to parse judge response: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
+
 
   async evaluateWithJudge(query: string, response: string, expected = '', sources?: string[]): Promise<EvaluationMetrics> {
     const sourcesKey = sources ? sources.join('|') : '';
@@ -243,9 +307,12 @@ Response to Evaluate: """${response}"""`;
         options: {
           temperature: 0.1,
           top_p: 0.9,
-          num_predict: 512, // Shorter response for evaluation
+          num_predict: 512,
         },
+        stream: false, // ✅ Ensure not using stream when you don't want to see <think>
+        think: false,  // ✅ Critical to disable the <think> phase
       });
+
 
       if (!res?.message?.content) {
         throw new Error('Empty response from judge model');
@@ -287,7 +354,7 @@ async function loadDataset(datasetPath: string): Promise<DatasetItem[]> {
 }
 
 function createSSEStream(): { stream: Readable; push: (data: string) => void; end: () => void } {
-  const stream = new Readable({ read() {} });
+  const stream = new Readable({ read() { } });
 
   const push = (data: string) => {
     if (!stream.destroyed) {
@@ -403,18 +470,26 @@ export async function POST(req: NextRequest) {
             sumMem += generation.memDelta;
             validCount++;
 
-            // Send item completion update
+            // Send item completion update with memory details
             sse.push(`event: item\ndata: ${JSON.stringify({
               index: i,
-              query: query.substring(0, 100) + (query.length > 100 ? '...' : ''),
+              query: query.substring(0, 50) + (query.length > 50 ? '...' : ''),
               score: evaluation.overall_score,
               time: generation.time,
+              memory: generation.memDelta,
+              memDetails: generation.memDetails,
               sources: generation.sources?.length || 0
             })}\n\n`);
 
           } catch (error) {
             const errorMsg = error instanceof Error ? error.message : 'Unknown error';
             errors.push(`Item ${i + 1}: ${errorMsg}`);
+
+            // Send error update
+            sse.push(`event: item_error\ndata: ${JSON.stringify({
+              index: i,
+              error: errorMsg
+            })}\n\n`);
           }
 
           // Send progress update
@@ -437,7 +512,7 @@ export async function POST(req: NextRequest) {
         }
 
         // Calculate final results
-        const avg = (sum: number) => parseFloat((sum / validCount).toFixed(2));
+        const avg = (sum: number) => parseFloat((sum / validCount).toFixed(3));
         const successRate = parseFloat(((validCount / total) * 100).toFixed(2));
 
         const result: EvaluationResult = {
@@ -470,6 +545,15 @@ export async function POST(req: NextRequest) {
       } finally {
         // Clean up
         evaluator.clearCache();
+
+        // Final garbage collection
+        if (global.gc) {
+          try {
+            global.gc();
+          } catch (error) {
+            // Ignore GC errors
+          }
+        }
       }
     })();
 

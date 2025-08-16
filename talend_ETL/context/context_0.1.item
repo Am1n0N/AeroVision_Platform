@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendfile:ContextType xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:talendfile="platform:/resource/org.talend.model/model/TalendFile.xsd" xmi:id="_8_zMkHPTEfCbLoJzIb7tSQ" confirmationNeeded="false" name="Default">
+  <contextParameter xmi:id="_8_zMkXPTEfCbLoJzIb7tSQ" comment="" name="apikey" prompt="apikey?" promptNeeded="false" repositoryContextId="built-in" type="id_String" value="689fe5df4893475ec5848bb8"/>
+</talendfile:ContextType>

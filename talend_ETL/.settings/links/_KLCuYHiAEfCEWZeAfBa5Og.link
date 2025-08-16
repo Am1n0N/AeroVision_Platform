@@ -1,0 +1,11 @@
+{
+  "itemId" : "_KLCuYHiAEfCEWZeAfBa5Og",
+  "contextList" : [ {
+    "contextName" : "Default",
+    "repoId" : "_8_Zj8HPTEfCbLoJzIb7tSQ",
+    "parameterList" : [ {
+      "id" : "_8_zMkXPTEfCbLoJzIb7tSQ",
+      "name" : "apikey"
+    } ]
+  } ]
+}

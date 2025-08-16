@@ -25,7 +25,13 @@ import {
   Moon,
   Database,
   BookOpen,
-  Settings2
+  Settings2,
+  History,
+  Trash2,
+  Download,
+  TrendingUp,
+  Calendar,
+  Award
 } from 'lucide-react';
 import { Separator } from '@/components/ui/separator';
 import { useToast } from '@/components/ui/use-toast';
@@ -76,6 +82,19 @@ interface EvaluationResult {
   message: string;
   output: EvaluationOutput;
   errors?: string[];
+}
+
+interface BenchmarkHistory {
+  id: string;
+  timestamp: Date;
+  model: string;
+  judge: string;
+  dataset: string;
+  useRAG: boolean;
+  maxKnowledgeResults?: number;
+  result: EvaluationResult;
+  duration: number; // in seconds
+  status: 'completed' | 'error' | 'cancelled';
 }
 
 type EvaluationStatus = 'idle' | 'running' | 'completed' | 'error' | 'cancelled';
@@ -130,6 +149,10 @@ function EvaluationFormInner() {
   const [ragConfig, setRagConfig] = useState<StartData | null>(null);
   const [recentItems, setRecentItems] = useState<ItemData[]>([]);
 
+  // Benchmark history state
+  const [benchmarkHistory, setBenchmarkHistory] = useState<BenchmarkHistory[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+
   const abortControllerRef = useRef<AbortController | null>(null);
   const { isDark, toggleDark } = useDarkMode();
 
@@ -143,6 +166,66 @@ function EvaluationFormInner() {
     setRagConfig(null);
     setRecentItems([]);
   }, []);
+
+  const saveBenchmark = useCallback((
+    formValues: z.infer<typeof evalSchema>,
+    evaluationResult: EvaluationResult,
+    evaluationStatus: EvaluationStatus,
+    startTime: Date,
+    endTime: Date
+  ) => {
+    const benchmark: BenchmarkHistory = {
+      id: `benchmark_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: startTime,
+      model: formValues.model,
+      judge: formValues.judge,
+      dataset: formValues.dataset,
+      useRAG: formValues.useKnowledgeBase,
+      maxKnowledgeResults: formValues.useKnowledgeBase ? formValues.maxKnowledgeResults : undefined,
+      result: evaluationResult,
+      duration: Math.round((endTime.getTime() - startTime.getTime()) / 1000),
+      status: evaluationStatus,
+    };
+
+    setBenchmarkHistory(prev => [benchmark, ...prev]);
+    toast({
+      title: 'Benchmark Saved',
+      description: 'Results have been added to benchmark history',
+    });
+  }, [toast]);
+
+  const deleteBenchmark = useCallback((id: string) => {
+    setBenchmarkHistory(prev => prev.filter(b => b.id !== id));
+    toast({
+      title: 'Benchmark Deleted',
+      description: 'Benchmark has been removed from history',
+    });
+  }, [toast]);
+
+  const clearAllBenchmarks = useCallback(() => {
+    setBenchmarkHistory([]);
+    toast({
+      title: 'History Cleared',
+      description: 'All benchmarks have been removed',
+    });
+  }, [toast]);
+
+  const exportBenchmarks = useCallback(() => {
+    const data = JSON.stringify(benchmarkHistory, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `benchmark_history_${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast({
+      title: 'Export Complete',
+      description: 'Benchmark history has been exported',
+    });
+  }, [benchmarkHistory, toast]);
 
   const cancelEvaluation = useCallback(() => {
     if (abortControllerRef.current) {
@@ -163,7 +246,8 @@ function EvaluationFormInner() {
     setStatusMessage('Starting evaluation...');
     setModelUsed(values.model);
     setJudgeUsed(values.judge);
-    setStartTime(new Date());
+    const evalStartTime = new Date();
+    setStartTime(evalStartTime);
 
     // Create new abort controller
     abortControllerRef.current = new AbortController();
@@ -236,11 +320,15 @@ function EvaluationFormInner() {
               setRecentItems(prev => [data, ...prev.slice(0, 4)]); // Keep last 5 items
             } else if (event === 'done') {
               const data = JSON.parse(dataStr) as EvaluationResult;
+              const evalEndTime = new Date();
               setResult(data);
               setStatus('completed');
               setStatusMessage('Evaluation completed successfully');
               setProgress(100);
-              setEndTime(new Date());
+              setEndTime(evalEndTime);
+
+              // Save to benchmark history
+              saveBenchmark(values, data, 'completed', evalStartTime, evalEndTime);
 
               if (data.errors && data.errors.length > 0) {
                 setEvaluationErrors(data.errors);
@@ -265,9 +353,10 @@ function EvaluationFormInner() {
       }
 
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      const evalEndTime = new Date();
       setStatus('error');
       setStatusMessage(`Error: ${errorMessage}`);
-      setEndTime(new Date());
+      setEndTime(evalEndTime);
 
       toast({
         title: 'Evaluation Failed',
@@ -317,6 +406,32 @@ function EvaluationFormInner() {
     return <Brain className={iconClasses} />;
   };
 
+  const getBenchmarkStatusColor = (status: string) => {
+    switch (status) {
+      case 'completed':
+        return 'text-green-600 dark:text-green-400 bg-green-100 dark:bg-green-900/20';
+      case 'error':
+        return 'text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900/20';
+      case 'cancelled':
+        return 'text-yellow-600 dark:text-yellow-400 bg-yellow-100 dark:bg-yellow-900/20';
+      default:
+        return 'text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-900/20';
+    }
+  };
+
+  const getBestScore = () => {
+    const completedBenchmarks = benchmarkHistory.filter(b => b.status === 'completed');
+    if (completedBenchmarks.length === 0) return null;
+    return Math.max(...completedBenchmarks.map(b => b.result.output['Overall Score']));
+  };
+
+  const getAverageScore = () => {
+    const completedBenchmarks = benchmarkHistory.filter(b => b.status === 'completed');
+    if (completedBenchmarks.length === 0) return null;
+    const total = completedBenchmarks.reduce((sum, b) => sum + b.result.output['Overall Score'], 0);
+    return total / completedBenchmarks.length;
+  };
+
   const useKnowledgeBase = form.watch('useKnowledgeBase');
 
   return (
@@ -337,13 +452,186 @@ function EvaluationFormInner() {
         </Button>
       </div>
 
-      <div className="h-full p-4 space-y-6 max-w-4xl mx-auto pt-16">
+      <div className="h-full p-4 space-y-6 max-w-6xl mx-auto pt-16">
+        {/* Header with History Toggle */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900 dark:text-white">LLM Evaluation Dashboard</h1>
+            <p className="text-gray-600 dark:text-gray-400 mt-1">
+              {benchmarkHistory.length > 0 ? `${benchmarkHistory.length} benchmark${benchmarkHistory.length !== 1 ? 's' : ''} in history` : 'No benchmarks yet'}
+            </p>
+          </div>
+          {benchmarkHistory.length > 0 && (
+            <Button
+              variant="outline"
+              onClick={() => setShowHistory(!showHistory)}
+              className="bg-white dark:bg-[#1a1a1a] border-gray-200 dark:border-[#2a2a2a]"
+            >
+              <History className="w-4 h-4 mr-2" />
+              {showHistory ? 'Hide' : 'Show'} History
+            </Button>
+          )}
+        </div>
+
+        {/* Benchmark History Overview */}
+        {showHistory && benchmarkHistory.length > 0 && (
+          <div className="bg-white dark:bg-[#1a1a1a] shadow-md border border-gray-200 dark:border-[#2a2a2a] rounded-2xl transition-colors duration-300">
+            <div className="px-6 py-4 border-b border-gray-200 dark:border-[#2a2a2a]">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold flex items-center gap-2 text-gray-900 dark:text-gray-100">
+                  <History className="w-5 h-5 text-purple-600 dark:text-purple-400" />
+                  Benchmark History ({benchmarkHistory.length})
+                </h2>
+                <div className="flex gap-2">
+                  {benchmarkHistory.length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={exportBenchmarks}
+                      className="bg-white dark:bg-[#2a2a2a] border-gray-200 dark:border-[#333]"
+                    >
+                      <Download className="w-4 h-4 mr-1" />
+                      Export
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={clearAllBenchmarks}
+                    className="bg-white dark:bg-[#2a2a2a] border-gray-200 dark:border-[#333] text-red-600 dark:text-red-400"
+                  >
+                    <Trash2 className="w-4 h-4 mr-1" />
+                    Clear All
+                  </Button>
+                </div>
+              </div>
+
+              {/* Summary Stats */}
+              {benchmarkHistory.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                  <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded-lg">
+                    <div className="flex items-center gap-2">
+                      <Award className="w-4 h-4 text-green-600 dark:text-green-400" />
+                      <span className="text-sm font-medium text-green-800 dark:text-green-200">Best Score</span>
+                    </div>
+                    <p className="text-xl font-bold text-green-900 dark:text-green-100">
+                      {getBestScore()?.toFixed(1) || 'N/A'}
+                    </p>
+                  </div>
+                  <div className="bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg">
+                    <div className="flex items-center gap-2">
+                      <TrendingUp className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                      <span className="text-sm font-medium text-blue-800 dark:text-blue-200">Average Score</span>
+                    </div>
+                    <p className="text-xl font-bold text-blue-900 dark:text-blue-100">
+                      {getAverageScore()?.toFixed(1) || 'N/A'}
+                    </p>
+                  </div>
+                  <div className="bg-purple-50 dark:bg-purple-900/20 p-3 rounded-lg">
+                    <div className="flex items-center gap-2">
+                      <BarChart3 className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                      <span className="text-sm font-medium text-purple-800 dark:text-purple-200">Completed</span>
+                    </div>
+                    <p className="text-xl font-bold text-purple-900 dark:text-purple-100">
+                      {benchmarkHistory.filter(b => b.status === 'completed').length}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4">
+              <div className="space-y-4 max-h-96 overflow-y-auto">
+                {benchmarkHistory.map((benchmark) => (
+                  <div
+                    key={benchmark.id}
+                    className="p-4 border border-gray-200 dark:border-[#2a2a2a] rounded-xl bg-gray-50 dark:bg-[#111111] hover:shadow-md transition-all"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-2">
+                          <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">
+                            {benchmark.model}
+                          </h4>
+                          <span className={`px-2 py-1 rounded text-xs font-medium ${getBenchmarkStatusColor(benchmark.status)}`}>
+                            {benchmark.status}
+                          </span>
+                          {benchmark.useRAG && (
+                            <div className="flex items-center gap-1 px-2 py-1 bg-purple-100 dark:bg-purple-900 text-purple-800 dark:text-purple-200 rounded text-xs">
+                              <Database className="w-3 h-3" />
+                              RAG
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-gray-600 dark:text-gray-400 mb-2">
+                          <div>Judge: {benchmark.judge}</div>
+                          <div>Duration: {benchmark.duration}s</div>
+                          <div className="flex items-center gap-1">
+                            <Calendar className="w-3 h-3" />
+                            {benchmark.timestamp.toLocaleDateString()}
+                          </div>
+                          <div>{benchmark.timestamp.toLocaleTimeString()}</div>
+                        </div>
+
+                        {benchmark.status === 'completed' && (
+                          <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                            <div className="bg-white dark:bg-[#1a1a1a] p-2 rounded border">
+                              <div className="text-gray-500 dark:text-gray-400">Overall Score</div>
+                              <div className="font-semibold text-gray-900 dark:text-gray-100">
+                                {benchmark.result.output['Overall Score']}
+                              </div>
+                            </div>
+                            <div className="bg-white dark:bg-[#1a1a1a] p-2 rounded border">
+                              <div className="text-gray-500 dark:text-gray-400">Success Rate</div>
+                              <div className="font-semibold text-gray-900 dark:text-gray-100">
+                                {benchmark.result.output['Success Rate (%)']}%
+                              </div>
+                            </div>
+                            <div className="bg-white dark:bg-[#1a1a1a] p-2 rounded border">
+                              <div className="text-gray-500 dark:text-gray-400">Avg Time</div>
+                              <div className="font-semibold text-gray-900 dark:text-gray-100">
+                                {benchmark.result.output['Resp. Time (s)'].toFixed(2)}s
+                              </div>
+                            </div>
+                            <div className="bg-white dark:bg-[#1a1a1a] p-2 rounded border">
+                              <div className="text-gray-500 dark:text-gray-400">Memory</div>
+                              <div className="font-semibold text-gray-900 dark:text-gray-100">
+                                {benchmark.result.output['Memory (MB)'].toFixed(1)}MB
+                              </div>
+                            </div>
+                            <div className="bg-white dark:bg-[#1a1a1a] p-2 rounded border">
+                              <div className="text-gray-500 dark:text-gray-400">Valid Items</div>
+                              <div className="font-semibold text-gray-900 dark:text-gray-100">
+                                {benchmark.result.output['Valid Items']}/{benchmark.result.output['Total Items']}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => deleteBenchmark(benchmark.id)}
+                        className="text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Panel: Evaluation Config */}
         <div className="bg-white dark:bg-[#1a1a1a] shadow-md border border-gray-200 dark:border-[#2a2a2a] rounded-2xl transition-colors duration-300">
           <div className="px-6 py-4 border-b border-gray-200 dark:border-[#2a2a2a]">
             <h2 className="text-xl font-semibold flex items-center gap-2 text-gray-900 dark:text-gray-100">
               <Brain className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-              LLM Evaluation Dashboard
+              Evaluation Configuration
             </h2>
             <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
               Configure and run comprehensive evaluations of your language models with optional RAG enhancement
@@ -611,7 +899,7 @@ function EvaluationFormInner() {
                     <div className="w-12 h-2 bg-gray-200 dark:bg-[#2f2f2f] rounded-full">
                       <div
                         className="h-2 bg-green-500 rounded-full"
-                        style={{ width: `${item.score}%` }}
+                        style={{ width: `${item.score* 20}%` }}
                       />
                     </div>
                   </div>

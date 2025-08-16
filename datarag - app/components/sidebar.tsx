@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import {Database, FileStack, Plus, TestTube} from "lucide-react";
+import {Database, FileStack, Plus,Bot ,TestTube} from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
 export const Sidebar = () => {
@@ -9,6 +9,11 @@ export const Sidebar = () => {
     const router = useRouter();
 
     const routes = [
+        {
+            icon: Bot,
+            href: "/chat",
+            label: "Chat",
+        },
         {
             icon: FileStack,
             href: "/",
@@ -19,10 +24,10 @@ export const Sidebar = () => {
             href: "/documents/new",
             label: "Create",
         },
-        {
+          {
             icon: Database,
-            href: "/data",
-            label: "Data",
+            href: "/database",
+            label: "Database",
         },
          {
             icon: TestTube,
