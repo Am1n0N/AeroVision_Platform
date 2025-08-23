@@ -3,7 +3,7 @@
 import { BeatLoader } from "react-spinners";
 import { Copy } from "lucide-react";
 import { useTheme } from "next-themes";
-import ReactMarkdown from "react-markdown";
+import { Streamdown } from 'streamdown';
 
 import { cn } from "@/lib/utils";
 import { BotAvatar } from "@/components/bot-avatar";
@@ -54,20 +54,6 @@ export const ChatBubble = ({
     }
   }
 
-  const markdownComponents = {
-    p: ({ children }: { children: React.ReactNode }) => (
-      <p className="mb-3">{children}</p>
-    ),
-    ul: ({ children }: { children: React.ReactNode }) => (
-      <ul className="list-disc ml-5 mb-3">{children}</ul>
-    ),
-    ol: ({ children }: { children: React.ReactNode }) => (
-      <ol className="list-decimal ml-5 mb-3">{children}</ol>
-    ),
-    li: ({ children }: { children: React.ReactNode }) => (
-      <li className="mb-1">{children}</li>
-    ),
-  };
 
   return (
     <div
@@ -88,15 +74,15 @@ export const ChatBubble = ({
           <>
             {thinkText && (
               <div className="border-l-4 border-gray-300 dark:border-gray-700 pl-3 text-gray-600 dark:text-gray-300 mb-2">
-                <ReactMarkdown components={markdownComponents}>
+                <Streamdown>
                   {thinkText}
-                </ReactMarkdown>
+                </Streamdown>
               </div>
             )}
             <div>
-              <ReactMarkdown components={markdownComponents}>
+              <Streamdown>
                 {replyText}
-              </ReactMarkdown>
+              </Streamdown>
             </div>
           </>
         )}

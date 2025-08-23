@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect } from 'react';
 import { Database, Search, Code, Table, AlertCircle, Clock, CheckCircle, Loader, Copy } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import { Streamdown } from 'streamdown';
 import { BeatLoader } from 'react-spinners';
 
 interface QueryResult {
@@ -35,66 +35,10 @@ const DatabaseQueryInterface = () => {
   const [tableInfo, setTableInfo] = useState<TableInfo>({});
   const [showSchema, setShowSchema] = useState(false);
 
-  // Markdown utilities
-  const fixMarkdownLists = (markdown: string): string => {
-    return markdown.replace(/([^\n])\n(-|\d+\.)/g, "$1\n\n$2");
-  };
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     // You can add a toast notification here if you have one
-  };
-
-  const markdownComponents = {
-    p: ({ children }: { children: React.ReactNode }) => (
-      <p className="mb-3">{children}</p>
-    ),
-    ul: ({ children }: { children: React.ReactNode }) => (
-      <ul className="list-disc ml-5 mb-3">{children}</ul>
-    ),
-    ol: ({ children }: { children: React.ReactNode }) => (
-      <ol className="list-decimal ml-5 mb-3">{children}</ol>
-    ),
-    li: ({ children }: { children: React.ReactNode }) => (
-      <li className="mb-1">{children}</li>
-    ),
-    h1: ({ children }: { children: React.ReactNode }) => (
-      <h1 className="text-2xl font-bold mb-4">{children}</h1>
-    ),
-    h2: ({ children }: { children: React.ReactNode }) => (
-      <h2 className="text-xl font-semibold mb-3">{children}</h2>
-    ),
-    h3: ({ children }: { children: React.ReactNode }) => (
-      <h3 className="text-lg font-medium mb-2">{children}</h3>
-    ),
-    code: ({ children }: { children: React.ReactNode }) => (
-      <code className="bg-gray-100 px-1 py-0.5 rounded text-sm font-mono">{children}</code>
-    ),
-    pre: ({ children }: { children: React.ReactNode }) => (
-      <pre className="bg-gray-100 p-3 rounded-lg overflow-x-auto mb-3">{children}</pre>
-    ),
-    blockquote: ({ children }: { children: React.ReactNode }) => (
-      <blockquote className="border-l-4 border-blue-500 pl-4 italic text-gray-700 mb-3">{children}</blockquote>
-    ),
-    table: ({ children }: { children: React.ReactNode }) => (
-      <div className="overflow-x-auto mb-3">
-        <table className="min-w-full divide-y divide-gray-200">{children}</table>
-      </div>
-    ),
-    thead: ({ children }: { children: React.ReactNode }) => (
-      <thead className="bg-gray-50">{children}</thead>
-    ),
-    tbody: ({ children }: { children: React.ReactNode }) => (
-      <tbody className="bg-white divide-y divide-gray-200">{children}</tbody>
-    ),
-    th: ({ children }: { children: React.ReactNode }) => (
-      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-        {children}
-      </th>
-    ),
-    td: ({ children }: { children: React.ReactNode }) => (
-      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{children}</td>
-    ),
   };
 
   // Example queries
@@ -390,9 +334,9 @@ const getSampleData = async (tableName: string) => {
                   </div>
                   <div className="bg-blue-50 p-4 rounded-lg border-l-4 border-blue-400">
                     <div className="prose prose-sm max-w-none text-gray-800">
-                      <ReactMarkdown components={markdownComponents}>
-                        {fixMarkdownLists(result.answer)}
-                      </ReactMarkdown>
+                      <Streamdown>
+                        {result.answer}
+                      </Streamdown>
                     </div>
                   </div>
                 </div>
@@ -471,9 +415,9 @@ const getSampleData = async (tableName: string) => {
             /* Error Display */
             <div className="bg-red-50 border border-red-200 rounded-lg p-4">
               <div className="prose prose-sm max-w-none text-red-800">
-                <ReactMarkdown components={markdownComponents}>
-                  {fixMarkdownLists(result.error || "An unknown error occurred")}
-                </ReactMarkdown>
+                <Streamdown>
+                  {result.error}
+                </Streamdown>
               </div>
               {result.sqlQuery && (
                 <div className="mt-3">

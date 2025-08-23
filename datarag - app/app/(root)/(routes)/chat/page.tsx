@@ -1,7 +1,7 @@
 'use client';
 import React, { useState, useEffect, useRef } from 'react';
 import { Settings, Bot, Send, Trash2, X, Plus } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import { Streamdown } from 'streamdown';
 import remarkGfm from "remark-gfm";
 interface Message {
   id: string;
@@ -16,88 +16,6 @@ interface ModelOption {
   temperature: number;
 }
 
-const markdownComponents = {
-  p: ({ children }: { children: React.ReactNode }) => (
-    <p className="mb-3">{children}</p>
-  ),
-  ul: ({ children }: { children: React.ReactNode }) => (
-    <ul className="list-disc ml-5 mb-3">{children}</ul>
-  ),
-  ol: ({ children }: { children: React.ReactNode }) => (
-    <ol className="list-decimal ml-5 mb-3">{children}</ol>
-  ),
-  li: ({ children }: { children: React.ReactNode }) => (
-    <li className="mb-1">{children}</li>
-  ),
-  h1: ({ children }: { children: React.ReactNode }) => (
-    <h1 className="text-2xl font-bold mb-4">{children}</h1>
-  ),
-  h2: ({ children }: { children: React.ReactNode }) => (
-    <h2 className="text-xl font-semibold mb-3">{children}</h2>
-  ),
-  h3: ({ children }: { children: React.ReactNode }) => (
-    <h3 className="text-lg font-medium mb-2">{children}</h3>
-  ),
-  code: ({ children }: { children: React.ReactNode }) => (
-    <code className="bg-gray-100 px-1 py-0.5 rounded text-sm font-mono">{children}</code>
-  ),
-  pre: ({ children }: { children: React.ReactNode }) => (
-    <pre className="bg-gray-100 p-3 rounded-lg overflow-x-auto mb-3">{children}</pre>
-  ),
-  blockquote: ({ children }: { children: React.ReactNode }) => (
-    <blockquote className="border-l-4 border-blue-500 pl-4 italic text-gray-700 mb-3">{children}</blockquote>
-  ),
-  table: ({ children }: { children: React.ReactNode }) => (
-    <div className="my-3 max-h-96 overflow-auto rounded-xl border border-slate-200 shadow-sm">
-      <table className="min-w-[680px] table-auto border-collapse">
-        {children}
-      </table>
-    </div>
-  ),
-
-  thead: ({ children }: { children: React.ReactNode }) => (
-    <thead className="bg-slate-50 sticky top-0 z-10">
-      {children}
-    </thead>
-  ),
-
-  // Zebra stripes + hover highlight
-  tr: ({ children }: { children: React.ReactNode }) => (
-    <tr className="odd:bg-white even:bg-slate-50 hover:bg-slate-100">
-      {children}
-    </tr>
-  ),
-
-  th: ({
-    children,
-    ...props
-  }: React.DetailedHTMLProps<
-    React.ThHTMLAttributes<HTMLTableCellElement>,
-    HTMLTableCellElement
-  >) => (
-    <th
-      {...props}
-      className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600 border-b border-slate-200 bg-slate-50 [text-align:inherit]"
-    >
-      {children}
-    </th>
-  ),
-
-  td: ({
-    children,
-    ...props
-  }: React.DetailedHTMLProps<
-    React.TdHTMLAttributes<HTMLTableCellElement>,
-    HTMLTableCellElement
-  >) => (
-    <td
-      {...props}
-      className="px-3 py-2 text-sm text-slate-800 align-top border-b border-slate-100 [text-align:inherit]"
-    >
-      <div className="max-w-[34rem] break-words">{children}</div>
-    </td>
-  ),
-};
 
 const ChatInterface = () => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -374,11 +292,9 @@ const ChatInterface = () => {
                           : `bg-gray-100 text-gray-800 dark:bg-slate-900 dark:text-gray-200`
                       }`}>
                       <div className="whitespace-pre-wrap break-words">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={markdownComponents}>
+                        <Streamdown>
                           {message.content}
-                        </ReactMarkdown>
+                        </Streamdown>
                       </div>
                       <div className="text-xs opacity-70 mt-2">
                         {new Date(message.createdAt || Date.now()).toLocaleTimeString()}

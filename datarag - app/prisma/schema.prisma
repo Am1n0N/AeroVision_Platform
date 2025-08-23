@@ -20,7 +20,7 @@ model Category {
   name      String
   createdAt DateTime @default(now())
   documents Document[]
-} 
+}
 // PDF documents
 model Document {
   id        String   @id @default(uuid())
