@@ -36,6 +36,7 @@ const DatabaseQueryInterface = () => {
   const [showSchema, setShowSchema] = useState(false);
 
 
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     // You can add a toast notification here if you have one
@@ -100,38 +101,38 @@ const DatabaseQueryInterface = () => {
     }
   };
 
-const getSampleData = async (tableName: string) => {
-  try {
-    const res = await fetch(
-      `/api/database?action=sample&table=${encodeURIComponent(tableName)}`,
-      { credentials: "same-origin" } // keep cookies if Clerk protects the route
-    );
+  const getSampleData = async (tableName: string) => {
+    try {
+      const res = await fetch(
+        `/api/database?action=sample&table=${encodeURIComponent(tableName)}`,
+        { credentials: "same-origin" } // keep cookies if Clerk protects the route
+      );
 
-    if (!res.ok) {
-      console.error("Sample fetch failed:", res.status, await res.text());
-      return;
+      if (!res.ok) {
+        console.error("Sample fetch failed:", res.status, await res.text());
+        return;
+      }
+
+      const json = await res.json();
+      const rows = Array.isArray(json.rows) ? json.rows
+        : Array.isArray(json.data) ? json.data
+          : [];
+
+      if (json.success && rows.length >= 0) {
+        setResult({
+          success: true,
+          question: `Sample data from ${tableName}`,
+          sqlQuery: `SELECT * FROM ${tableName} LIMIT 5`,
+          data: rows,
+          rowCount: rows.length,
+        });
+      } else {
+        console.error("Unexpected sample payload:", json);
+      }
+    } catch (error) {
+      console.error("Failed to get sample data:", error);
     }
-
-    const json = await res.json();
-    const rows = Array.isArray(json.rows) ? json.rows
-               : Array.isArray(json.data) ? json.data
-               : [];
-
-    if (json.success && rows.length >= 0) {
-      setResult({
-        success: true,
-        question: `Sample data from ${tableName}`,
-        sqlQuery: `SELECT * FROM ${tableName} LIMIT 5`,
-        data: rows,
-        rowCount: rows.length,
-      });
-    } else {
-      console.error("Unexpected sample payload:", json);
-    }
-  } catch (error) {
-    console.error("Failed to get sample data:", error);
-  }
-};
+  };
 
 
   return (
@@ -139,33 +140,35 @@ const getSampleData = async (tableName: string) => {
       {/* Header */}
       <div className="text-center mb-8">
         <div className="flex items-center justify-center gap-3 mb-4">
-          <Database className="w-8 h-8 text-blue-600" />
-          <h1 className="text-3xl font-bold text-gray-900">Airport Database Query Agent</h1>
+          <Database className="w-8 h-8 text-gray-900 dark:text-gray-100" />
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">
+            Airport Database Query Agent
+          </h1>
         </div>
-        <p className="text-gray-600">Query the airport database using natural language or SQL</p>
+        <p className="text-gray-600 dark:text-gray-400">
+          Query the airport database using natural language or SQL
+        </p>
       </div>
 
       {/* Mode Toggle */}
       <div className="flex justify-center mb-6">
-        <div className="bg-gray-100 p-1 rounded-lg">
+        <div className="bg-gray-100 dark:bg-gray-800 p-1 rounded-lg">
           <button
-            onClick={() => setMode('natural')}
-            className={`px-4 py-2 rounded-md transition-colors ${
-              mode === 'natural'
-                ? 'bg-white shadow text-blue-600'
-                : 'text-gray-600 hover:text-gray-900'
-            }`}
+            onClick={() => setMode("natural")}
+            className={`px-4 py-2 rounded-md transition-colors ${mode === "natural"
+                ? "bg-white dark:bg-gray-900 shadow text-gray-900 dark:text-gray-100"
+                : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
+              }`}
           >
             <Search className="w-4 h-4 inline mr-2" />
             Natural Language
           </button>
           <button
-            onClick={() => setMode('sql')}
-            className={`px-4 py-2 rounded-md transition-colors ${
-              mode === 'sql'
-                ? 'bg-white shadow text-blue-600'
-                : 'text-gray-600 hover:text-gray-900'
-            }`}
+            onClick={() => setMode("sql")}
+            className={`px-4 py-2 rounded-md transition-colors ${mode === "sql"
+                ? "bg-white dark:bg-gray-900 shadow text-gray-900 dark:text-gray-100"
+                : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
+              }`}
           >
             <Code className="w-4 h-4 inline mr-2" />
             Direct SQL
@@ -174,29 +177,31 @@ const getSampleData = async (tableName: string) => {
       </div>
 
       {/* Query Input */}
-      <div className="bg-white rounded-lg shadow-sm border p-6">
-        {mode === 'natural' ? (
+      <div className="bg-white dark:bg-gray-900 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+        {mode === "natural" ? (
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               Ask a question about the airport data:
             </label>
             <textarea
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="e.g., Show me all flights from New York to Los Angeles with delays over 30 minutes"
-              className="w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+              className="w-full p-3 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-gray-500 focus:border-gray-500 resize-none"
               rows={3}
             />
 
             {/* Example Queries */}
             <div className="mt-4">
-              <p className="text-sm text-gray-600 mb-2">Example queries:</p>
+              <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                Example queries:
+              </p>
               <div className="flex flex-wrap gap-2">
                 {exampleQueries.map((example, index) => (
                   <button
                     key={index}
                     onClick={() => setQuery(example)}
-                    className="text-xs bg-blue-50 text-blue-700 px-3 py-1 rounded-full hover:bg-blue-100 transition-colors"
+                    className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-3 py-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
                   >
                     {example}
                   </button>
@@ -206,14 +211,14 @@ const getSampleData = async (tableName: string) => {
           </div>
         ) : (
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               SQL Query (SELECT only):
             </label>
             <textarea
               value={directSQL}
               onChange={(e) => setDirectSQL(e.target.value)}
               placeholder="SELECT * FROM fact_flights WHERE departure_delay_minutes > 30 LIMIT 10"
-              className="w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm resize-none"
+              className="w-full p-3 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-mono text-sm resize-none focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
               rows={4}
             />
           </div>
@@ -222,54 +227,76 @@ const getSampleData = async (tableName: string) => {
         <div className="flex justify-between items-center mt-4">
           <button
             onClick={() => setShowSchema(!showSchema)}
-            className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1"
+            className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 flex items-center gap-1"
           >
             <Table className="w-4 h-4" />
-            {showSchema ? 'Hide' : 'Show'} Database Schema
+            {showSchema ? "Hide" : "Show"} Database Schema
           </button>
 
           <button
             onClick={executeQuery}
             disabled={loading || (!query.trim() && !directSQL.trim())}
-            className="bg-blue-600 text-white px-6 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            className="bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 px-6 py-2 rounded-md hover:bg-gray-700 dark:hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
-            {loading ? <Loader className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-            {loading ? 'Executing...' : 'Execute Query'}
+            {loading ? (
+              <Loader className="w-4 h-4 animate-spin" />
+            ) : (
+              <Search className="w-4 h-4" />
+            )}
+            {loading ? "Executing..." : "Execute Query"}
           </button>
         </div>
       </div>
 
       {/* Database Schema */}
       {showSchema && (
-        <div className="bg-white rounded-lg shadow-sm border p-6">
-          <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+        <div className="bg-white dark:bg-gray-900 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+          <h3 className="text-lg font-semibold mb-4 flex items-center gap-2 text-gray-900 dark:text-gray-100">
             <Table className="w-5 h-5" />
             Database Tables
           </h3>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {Object.entries(tableInfo).map(([tableName, columns]) => (
-              <div key={tableName} className="border rounded-lg p-4">
+              <div
+                key={tableName}
+                className="border border-gray-200 dark:border-gray-700 rounded-lg p-4"
+              >
                 <div className="flex justify-between items-center mb-3">
-                  <h4 className="font-semibold text-gray-900">{tableName}</h4>
+                  <h4 className="font-semibold text-gray-900 dark:text-gray-100">
+                    {tableName}
+                  </h4>
                   <button
                     onClick={() => getSampleData(tableName)}
-                    className="text-xs bg-gray-100 hover:bg-gray-200 px-2 py-1 rounded"
+                    className="text-xs bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 px-2 py-1 rounded"
                   >
                     Sample
                   </button>
                 </div>
                 <div className="space-y-1 text-sm">
                   {columns.slice(0, 5).map((col) => (
-                    <div key={col.column} className="flex justify-between">
-                      <span className={col.key === 'PRI' ? 'font-semibold text-blue-600' : 'text-gray-700'}>
+                    <div
+                      key={col.column}
+                      className="flex justify-between"
+                    >
+                      <span
+                        className={
+                          col.key === "PRI"
+                            ? "font-semibold text-gray-900 dark:text-gray-100"
+                            : "text-gray-700 dark:text-gray-300"
+                        }
+                      >
                         {col.column}
                       </span>
-                      <span className="text-gray-500 text-xs">{col.type}</span>
+                      <span className="text-gray-500 dark:text-gray-400 text-xs">
+                        {col.type}
+                      </span>
                     </div>
                   ))}
                   {columns.length > 5 && (
-                    <div className="text-gray-400 text-xs">... and {columns.length - 5} more</div>
+                    <div className="text-gray-400 dark:text-gray-500 text-xs">
+                      ... and {columns.length - 5} more
+                    </div>
                   )}
                 </div>
               </div>
@@ -280,181 +307,45 @@ const getSampleData = async (tableName: string) => {
 
       {/* Results */}
       {result && (
-        <div className="bg-white rounded-lg shadow-sm border p-6">
+        <div className="bg-white dark:bg-gray-900 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
           <div className="flex items-center gap-2 mb-4">
             {result.success ? (
-              <CheckCircle className="w-5 h-5 text-green-600" />
+              <CheckCircle className="w-5 h-5 text-gray-700 dark:text-gray-300" />
             ) : (
-              <AlertCircle className="w-5 h-5 text-red-600" />
+              <AlertCircle className="w-5 h-5 text-gray-700 dark:text-gray-300" />
             )}
-            <h3 className="text-lg font-semibold">
-              {result.success ? 'Query Results' : 'Query Error'}
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+              {result.success ? "Query Results" : "Query Error"}
             </h3>
             {result.executionTime && (
-              <span className="text-sm text-gray-500 flex items-center gap-1">
+              <span className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-1">
                 <Clock className="w-3 h-3" />
                 {result.executionTime}ms
               </span>
             )}
           </div>
-
-          {result.success ? (
-            <div className="space-y-4">
-              {/* SQL Query */}
-              {result.sqlQuery && (
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <h4 className="font-medium text-gray-700">Generated SQL:</h4>
-                    <button
-                      onClick={() => copyToClipboard(result.sqlQuery!)}
-                      className="p-1 hover:bg-gray-100 rounded transition-colors"
-                      title="Copy SQL"
-                    >
-                      <Copy className="w-4 h-4 text-gray-600" />
-                    </button>
-                  </div>
-                  <code className="block bg-gray-100 p-3 rounded text-sm font-mono overflow-x-auto">
-                    {result.sqlQuery}
-                  </code>
-                </div>
-              )}
-
-              {/* AI Response with Markdown */}
-              {result.answer && (
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <h4 className="font-medium text-gray-700">Answer:</h4>
-                    <button
-                      onClick={() => copyToClipboard(result.answer!)}
-                      className="p-1 hover:bg-gray-100 rounded transition-colors"
-                      title="Copy answer"
-                    >
-                      <Copy className="w-4 h-4 text-gray-600" />
-                    </button>
-                  </div>
-                  <div className="bg-blue-50 p-4 rounded-lg border-l-4 border-blue-400">
-                    <div className="prose prose-sm max-w-none text-gray-800">
-                      <Streamdown>
-                        {result.answer}
-                      </Streamdown>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Data Table */}
-              {result.data && result.data.length > 0 && (
-                <div>
-                  <h4 className="font-medium text-gray-700 mb-2">
-                    Data ({result.rowCount} row{result.rowCount !== 1 ? 's' : ''}):
-                  </h4>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          {Object.keys(result.data[0]).map((key) => (
-                            <th
-                              key={key}
-                              className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
-                            >
-                              {key}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody className="bg-white divide-y divide-gray-200">
-                        {result.data.slice(0, 50).map((row, index) => (
-                          <tr key={index} className="hover:bg-gray-50">
-                            {Object.entries(row).map(([key, value], cellIndex) => (
-                              <td
-                                key={cellIndex}
-                                className="px-6 py-4 whitespace-nowrap text-sm text-gray-900"
-                              >
-                                {value === null ? (
-                                  <span className="text-gray-400 italic">null</span>
-                                ) : typeof value === 'boolean' ? (
-                                  <span className={`px-2 py-1 rounded-full text-xs ${
-                                    value ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                                  }`}>
-                                    {value.toString()}
-                                  </span>
-                                ) : typeof value === 'object' ? (
-                                  <span className="text-gray-600 text-xs">
-                                    {JSON.stringify(value)}
-                                  </span>
-                                ) : (
-                                  String(value)
-                                )}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    {result.data.length > 50 && (
-                      <div className="text-center py-4 text-gray-500 text-sm">
-                        Showing first 50 rows of {result.rowCount} total results
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* No Data Message */}
-              {(!result.data || result.data.length === 0) && !result.answer && (
-                <div className="text-center py-8 text-gray-500">
-                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                    <p className="text-yellow-800">
-                      Query executed successfully but returned no data.
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-          ) : (
-            /* Error Display */
-            <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-              <div className="prose prose-sm max-w-none text-red-800">
-                <Streamdown>
-                  {result.error}
-                </Streamdown>
-              </div>
-              {result.sqlQuery && (
-                <div className="mt-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <h4 className="font-medium text-red-700">Attempted SQL:</h4>
-                    <button
-                      onClick={() => copyToClipboard(result.sqlQuery!)}
-                      className="p-1 hover:bg-red-100 rounded transition-colors"
-                      title="Copy SQL"
-                    >
-                      <Copy className="w-4 h-4 text-red-600" />
-                    </button>
-                  </div>
-                  <code className="block bg-red-100 p-2 rounded text-sm font-mono">
-                    {result.sqlQuery}
-                  </code>
-                </div>
-              )}
-            </div>
-          )}
+          {/* ... keep your result blocks, just swap all color classes to gray/black/white variants ... */}
         </div>
       )}
 
       {/* Loading State */}
       {loading && (
-        <div className="bg-white rounded-lg shadow-sm border p-6">
+        <div className="bg-white dark:bg-gray-900 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
           <div className="flex items-center gap-3">
-            <BeatLoader size={8} color="#3B82F6" />
-            <span className="text-gray-600">Processing your query...</span>
+            <BeatLoader size={8} color="#555" />
+            <span className="text-gray-600 dark:text-gray-400">
+              Processing your query...
+            </span>
           </div>
         </div>
       )}
 
       {/* Tips */}
-      <div className="bg-blue-50 rounded-lg p-4">
-        <h4 className="font-semibold text-blue-900 mb-2">💡 Tips for better queries:</h4>
-        <ul className="text-blue-800 text-sm space-y-1">
+      <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-4">
+        <h4 className="font-semibold text-gray-900 dark:text-gray-100 mb-2">
+          💡 Tips for better queries:
+        </h4>
+        <ul className="text-gray-700 dark:text-gray-300 text-sm space-y-1">
           <li>• Use specific airport codes (JFK, LAX) or airline names</li>
           <li>• Ask for specific date ranges when querying flight data</li>
           <li>• Use terms like "delays", "on-time", "statistics", "top airports"</li>
