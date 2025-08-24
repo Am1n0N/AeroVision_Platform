@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { Database, Search, Code, Table, AlertCircle, Clock, CheckCircle, Loader, Copy } from 'lucide-react';
 import { Streamdown } from 'streamdown';
 import { BeatLoader } from 'react-spinners';
-
+import { toast, Toaster } from 'react-hot-toast';
 interface QueryResult {
   success: boolean;
   question?: string;
@@ -39,7 +39,7 @@ const DatabaseQueryInterface = () => {
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
-    // You can add a toast notification here if you have one
+    toast.success('Copied to clipboard!');
   };
 
   // Example queries

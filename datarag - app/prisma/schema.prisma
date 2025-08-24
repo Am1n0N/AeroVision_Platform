@@ -21,6 +21,7 @@ model Category {
   createdAt DateTime @default(now())
   documents Document[]
 }
+
 // PDF documents
 model Document {
   id        String   @id @default(uuid())
@@ -42,11 +43,74 @@ model Document {
   @@fulltext([title])
 }
 
-enum Role {
+// Chat Sessions - like Claude/ChatGPT
+model ChatSession {
+  id          String   @id @default(uuid())
+  title       String   @db.Text
+  userId      String
+  modelKey    String   @default("deepseek-r1:7b")
+
+  // Session metadata
+  isArchived  Boolean  @default(false)
+  isPinned    Boolean  @default(false)
+  lastMessageAt DateTime @default(now())
+  messageCount  Int    @default(0)
+
+  // AI Agent configuration for this session
+  useDatabase       Boolean @default(true)
+  useKnowledgeBase  Boolean @default(true)
+  temperature       Float   @default(0.2)
+  maxTokens         Int     @default(4000)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  chatMessages ChatMessage[]
+
+  @@index([userId])
+  @@index([lastMessageAt])
+  @@index([userId, lastMessageAt])
+  @@fulltext([title])
+}
+
+// General chat messages (separate from document-based messages)
+model ChatMessage {
+  id        String   @id @default(uuid())
+  content   String   @db.LongText
+  role      MessageRole
+
+  // Message metadata
+  modelUsed    String?
+  executionTime Int?     // in milliseconds
+  tokensUsed   Int?
+
+  // Context information
+  dbQueryUsed     Boolean @default(false)
+  dbQuery         String? @db.Text
+  dbResultCount   Int?
+  contextSources  String? // JSON array of context sources used
+
+  // Relations
+  sessionId String
+  userId    String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([sessionId])
+  @@index([userId])
+  @@index([sessionId, createdAt])
+}
+
+enum MessageRole {
   USER
+  ASSISTANT
   SYSTEM
 }
 
+// Document-based messages (keep existing functionality)
 model Message {
   id        String   @id @default(uuid())
   role     Role     @default(USER)
@@ -58,4 +122,30 @@ model Message {
   userId String
   document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   @@index([documentId])
+}
+
+enum Role {
+  USER
+  SYSTEM
+}
+
+// User preferences and settings
+model UserSettings {
+  id     String @id @default(uuid())
+  userId String @unique
+
+  // Default AI preferences
+  defaultModel      String @default("deepseek-r1:7b")
+  defaultTemperature Float @default(0.2)
+  useDatabase       Boolean @default(true)
+  useKnowledgeBase  Boolean @default(true)
+
+  // UI preferences
+  theme             String @default("system") // light, dark, system
+  sidebarCollapsed  Boolean @default(false)
+  showTokenCount    Boolean @default(false)
+  showExecutionTime Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
