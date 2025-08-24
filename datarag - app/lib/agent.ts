@@ -1,15 +1,19 @@
-
-// lib/agent.ts
+// lib/ai-agent.ts
 import { ChatOllama } from "@langchain/ollama";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { MemoryManager } from "@/lib/memory";
-import { rateLimit } from "@/lib/rate-limit";
+import { Document } from "@langchain/core/documents";
 import { currentUser } from "@clerk/nextjs";
 import { NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
+import { Redis } from "@upstash/redis";
+import { OllamaEmbeddings } from "@langchain/community/embeddings/ollama";
+import { Pinecone } from "@pinecone-database/pinecone";
+import { PineconeStore } from "@langchain/pinecone";
+import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import prismadb from "@/lib/prismadb";
+import { rateLimit } from "@/lib/rate-limit";
 
-// Database tools
+// Database tools (make sure these truly return JSON-able objects if using LangChain Tools)
 import {
   executeSql,
   generateQueryPrompt,
@@ -23,7 +27,98 @@ import {
 import { AVAILABLE_MODELS, type ModelKey } from "@/config/models";
 import { DATABASE_KEYWORDS, isDatabaseQuery } from "@/lib/database-detection";
 
-// Types
+/* --------------------------- Embedding configuration --------------------------- */
+
+export const EMBEDDING_MODELS = {
+  "nomic-embed-text": {
+    dimensions: 768,
+    contextLength: 8192,
+    description: "Best overall local embedding model, trained for RAG",
+    chunkSize: 512,
+  },
+  "mxbai-embed-large": {
+    dimensions: 1024,
+    contextLength: 512,
+    description: "High-quality embeddings, good for semantic search",
+    chunkSize: 256,
+  },
+  "snowflake-arctic-embed": {
+    dimensions: 1024,
+    contextLength: 512,
+    description: "Strong performance on retrieval tasks",
+    chunkSize: 384,
+  },
+  "all-minilm": {
+    dimensions: 384,
+    contextLength: 256,
+    description: "Fast and lightweight, good for quick prototyping",
+    chunkSize: 128,
+  },
+};
+
+interface EmbeddingConfig {
+  model: string;
+  baseUrl?: string;
+  chunkSize: number;
+  chunkOverlap: number;
+  batchSize: number;
+  enableMetadataFiltering: boolean;
+  useHierarchicalChunking: boolean;
+  enableSemanticChunking: boolean;
+}
+
+const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
+  model: "nomic-embed-text",
+  baseUrl: "http://localhost:11434",
+  chunkSize: 512,
+  chunkOverlap: 128,
+  batchSize: 10,
+  enableMetadataFiltering: true,
+  useHierarchicalChunking: true,
+  enableSemanticChunking: false,
+};
+
+/* --------------------------------- Utilities --------------------------------- */
+
+function truncateStringByBytes(str: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(str).length <= maxBytes) return str;
+  let truncated = str;
+  while (encoder.encode(truncated).length > maxBytes) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated;
+}
+
+export async function checkOllamaHealth(baseUrl = "http://localhost:11434"): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl}/api/tags`);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Renamed to avoid recursion with class method
+export async function pullOllamaModels(
+  models: string[] = ["nomic-embed-text"],
+  baseUrl = "http://localhost:11434"
+): Promise<void> {
+  for (const model of models) {
+    try {
+      await fetch(`${baseUrl}/api/pull`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: model }),
+      });
+    } catch (err) {
+      console.error(`Failed to pull model ${model}:`, err);
+    }
+  }
+}
+
+/* ------------------------------------ Types ----------------------------------- */
+
 export interface AgentConfig {
   modelKey?: ModelKey;
   temperature?: number;
@@ -32,8 +127,11 @@ export interface AgentConfig {
   useMemory?: boolean;
   useDatabase?: boolean;
   useKnowledgeBase?: boolean;
+  useReranking?: boolean;
   contextWindow?: number;
   timeout?: number;
+  rerankingThreshold?: number;
+  maxContextLength?: number;
 }
 
 export interface AgentContext {
@@ -58,6 +156,13 @@ export interface DatabaseQueryResult {
   explorationSteps?: string[];
 }
 
+export interface RerankingResult {
+  document: Document;
+  relevanceScore: number;
+  originalRank: number;
+  newRank: number;
+}
+
 export interface AgentResponse {
   content: string;
   model: string;
@@ -67,83 +172,89 @@ export interface AgentResponse {
     knowledge?: string;
     conversation?: string;
     similar?: string;
+    rerankedResults?: RerankingResult[];
   };
   metadata: {
     sessionId: string;
     dbQueryDetected: boolean;
     dbQueryConfidence: number;
     contextSources: string[];
+    rerankingApplied: boolean;
+    totalContextTokens?: number;
   };
 }
 
-// System Prompts
+export type DocumentKey = {
+  documentName: string;
+  modelName: string;
+  userId: string;
+};
+
+export type GeneralChatKey = {
+  modelName: string;
+  userId: string;
+  sessionId?: string;
+};
+
+/* --------------------------------- Prompts --------------------------------- */
+
 export const SYSTEM_PROMPTS = {
   chat: `
-You are an intelligent AI assistant with specialized knowledge in aviation, airport operations, and flight data analysis.
-
-You have access to:
-- A comprehensive knowledge base with aviation industry information
-- Live airport/flight database with real-time operational data
-- Conversation history and contextual memory
-- Multiple AI models optimized for different types of queries
+You are an intelligent AI assistant with specialized knowledge in aviation, airport operations, and flight data.
 
 RESPONSE GUIDELINES:
-- Provide accurate, helpful, and conversational responses
-- When database results are available, prioritize real data over general knowledge
-- Present technical information in accessible, business-friendly language
-- Include specific numbers, metrics, and concrete examples when possible
-- Acknowledge limitations and suggest alternatives when data is unavailable
-- Maintain professional yet approachable tone
+- Be accurate and helpful
+- Prefer live database results over general knowledge
+- Use simple, business-friendly language
+- Use concrete numbers when available
+- Be honest about limits
+- Keep a professional, approachable tone
+- Use reranked context when available
 
-CRITICAL: Always use actual database results when provided rather than hypothetical or general information.
+CRITICAL: Always use actual database results when provided.
 `.trim(),
 
   documentChat: `
-You are an intelligent document analysis assistant specialized in analyzing and answering questions about uploaded documents.
+You analyze and answer questions about uploaded documents.
 
-CAPABILITIES:
-- Analyze document content and structure
-- Answer questions based on document context
-- Provide references to specific document sections
-- Maintain conversation history for contextual responses
-
-RESPONSE GUIDELINES:
-- Base responses primarily on the document content provided
-- Reference specific sections or pages when possible
-- If information isn't in the document, clearly state this
-- Provide concise but comprehensive answers
-- Maintain context from previous questions in the conversation
-
-Current document context and conversation history will be provided for each query.
+GUIDELINES:
+- Base answers on provided document context
+- Point to specific sections/pages when possible
+- If info is missing, say so clearly
+- Be concise but complete
+- Keep conversation context
+- Use reranked results when available
 `.trim(),
 
   databaseExpert: `
-You are Querymancer, an elite database engineer and SQL optimization specialist with deep expertise in MySQL performance tuning and query construction.
+You are Querymancer, a MySQL specialist.
 
-Your mission is to transform natural language requests into precise, high-performance SQL queries that deliver exactly what users need from the airport/flight database.
+APPROACH:
+1) Understand user intent
+2) Inspect tables
+3) Build correct, efficient SQL
+4) Validate logic
+5) Present results with clear insights
 
-STRATEGIC APPROACH:
-1. Analyze the user's intent and identify the core data requirements
-2. Plan your database exploration strategy based on the specific request
-3. Use tools efficiently to understand relevant table structures
-4. Construct optimized queries with proper indexing considerations
-5. Validate query logic before execution
-6. Present results in business-friendly format with actionable insights
-
-OPTIMIZATION PRINCIPLES:
-- Leverage indexed columns (airport_iata, airline_iata, date_key) in WHERE clauses
-- Use proper JOIN strategies for multi-table queries
-- Apply LIMIT clauses for large result sets
-- Handle NULL values appropriately with NULLIF() for calculations
-- Prefer country_code over country for geographic filters
-- Use date_key format (YYYYMMDD) for efficient date filtering
+PRINCIPLES:
+- Use indexed columns in WHERE (airport_iata, airline_iata, date_key)
+- Join properly
+- LIMIT big results
+- Handle NULLs
+- Prefer country_code to country
+- date_key is YYYYMMDD
 
 Current date: ${new Date().toISOString().slice(0, 10)}
-Target audience: Business analysts and data scientists seeking actionable insights.
+Audience: business analysts and data scientists.
+`.trim(),
+
+  reranking: `
+Return 0.0-1.0 relevance scores. Be precise and consistent.
 `.trim(),
 };
 
-// Default configurations
+/* ------------------------------ Default config ------------------------------ */
+
 const DEFAULT_CONFIG: Required<AgentConfig> = {
   modelKey: "deepseek-r1:7b",
   temperature: 0.2,
@@ -152,21 +263,486 @@ const DEFAULT_CONFIG: Required<AgentConfig> = {
   useMemory: true,
   useDatabase: false,
   useKnowledgeBase: false,
+  useReranking: true,
   contextWindow: 8192,
   timeout: 60000,
+  rerankingThreshold: 0.5,
+  maxContextLength: 6000,
 };
 
-// Database Query Executor
-export class DatabaseQueryExecutor {
+/* ------------------------- Memory Manager (fixed) ------------------------- */
+
+class MemoryManager {
+  private static instance: MemoryManager;
+  private history: Redis;
+  private vectorDBClient: Pinecone;
+  private embeddings: OllamaEmbeddings;
+  private embeddingConfig: EmbeddingConfig;
+
+  private static readonly KNOWLEDGE_BASE_NAMESPACE = "knowledge_base";
+  private static readonly GENERAL_CHAT_PREFIX = "general_chat";
+
+  constructor(embeddingConfig?: Partial<EmbeddingConfig>) {
+    this.history = Redis.fromEnv();
+    this.vectorDBClient = new Pinecone({ apiKey: process.env.PINECONE_API_KEY! });
+    this.embeddingConfig = { ...DEFAULT_EMBEDDING_CONFIG, ...embeddingConfig };
+
+    this.embeddings = new OllamaEmbeddings({
+      model: this.embeddingConfig.model,
+      baseUrl: this.embeddingConfig.baseUrl,
+    });
+  }
+
+  private async getStore(namespace?: string) {
+    const pineconeIndex = this.vectorDBClient.Index(process.env.PINECONE_INDEX!);
+    return PineconeStore.fromExistingIndex(this.embeddings, {
+      pineconeIndex,
+      textKey: "text",
+      namespace,
+    });
+  }
+
+  public async init() {
+    const isHealthy = await this.healthCheck();
+    if (!isHealthy) {
+      console.warn("Ollama embeddings not healthy; embedding features may be limited.");
+    }
+  }
+
+  public getEmbeddingInfo() {
+    return {
+      model: this.embeddingConfig.model,
+      config: this.embeddingConfig,
+      modelDetails: EMBEDDING_MODELS[this.embeddingConfig.model as keyof typeof EMBEDDING_MODELS],
+      isHealthy: false, // updated by healthCheck if you want to expose it
+    };
+  }
+
+  private preprocessText(text: string): string {
+    let t = text.replace(/\s+/g, " ");
+    t = t.replace(/([a-z])([A-Z])/g, "$1 $2");
+    t = t.replace(/([.!?])([A-Z])/g, "$1 $2");
+    t = t.replace(/^Page \d+.*$/gm, "");
+    t = t.replace(/^\d+\s*$/gm, "");
+    t = t.replace(/[""]/g, '"').replace(/[–—]/g, "-");
+    return t.trim();
+  }
+
+  private classifyChunkType(content: string): "title" | "paragraph" | "list" | "table" | "unknown" {
+    const trimmed = content.trim();
+    if (trimmed.length < 100 && /^[A-Z][^.!?]*$/.test(trimmed)) return "title";
+    if (/^[\s]*[-•*]\s/.test(trimmed) || /^\d+\.\s/.test(trimmed)) return "list";
+    if (/\|\s*\w+\s*\|/.test(trimmed) || trimmed.split("\t").length > 2) return "table";
+    return trimmed.length > 50 ? "paragraph" : "unknown";
+  }
+
+  private makeDoc(content: string, metadata: Record<string, any>) {
+    const pageContent = this.preprocessText(content);
+    return new Document({
+      pageContent,
+      metadata: {
+        processingTimestamp: new Date().toISOString(),
+        chunkType: this.classifyChunkType(pageContent),
+        wordCount: pageContent.split(/\s+/).length,
+        tokenEstimate: Math.ceil(pageContent.length / 4),
+        ...metadata,
+        text: truncateStringByBytes(pageContent, 36000),
+      },
+    });
+  }
+
+  // Health check for Ollama connection
+  async healthCheck(): Promise<boolean> {
+    try {
+      const testEmbedding = await this.embeddings.embedQuery("test");
+      return Array.isArray(testEmbedding) && testEmbedding.length > 0;
+    } catch (error) {
+      console.error("Ollama health check failed:", error);
+      return false;
+    }
+  }
+
+  public static async getInstance(embeddingConfig?: Partial<EmbeddingConfig>) {
+    if (!MemoryManager.instance) {
+      MemoryManager.instance = new MemoryManager(embeddingConfig);
+      await MemoryManager.instance.init();
+    }
+    return MemoryManager.instance;
+  }
+
+  public async addToKnowledgeBase(content: string, metadata: Record<string, any> = {}) {
+    try {
+      const store = await this.getStore(MemoryManager.KNOWLEDGE_BASE_NAMESPACE);
+      const doc = this.makeDoc(content, {
+        ...metadata,
+        documentId: metadata.documentId || "knowledge_base",
+        addedAt: Date.now(),
+      });
+      await store.addDocuments([doc]);
+      return true;
+    } catch (err) {
+      console.error("Failed to add to knowledge base:", err);
+      return false;
+    }
+  }
+
+ public async processFile(
+  fileUrl: string,
+  documentId: string,
+  options: { chunkSize?: number; chunkOverlap?: number; enableHierarchicalChunking?: boolean } = {}
+): Promise<string[]> {
+  if (!fileUrl) throw new Error("fileUrl is required");
+
+  let loader: PDFLoader;
+
+  if (/^https?:\/\//i.test(fileUrl)) {
+    // fetch to memory then pass bytes (Uint8Array) to PDFLoader
+    const res = await fetch(fileUrl, { headers: { Accept: "application/pdf" } });
+    if (!res.ok) throw new Error(`Failed to fetch PDF: ${res.status} ${res.statusText}`);
+    const ab = await res.arrayBuffer();
+    loader = new PDFLoader(new Blob([ab], { type: "application/pdf" }), {
+      // You can pass your pdfjs import if needed:
+      // pdfjs: () => import("pdfjs-dist/legacy/build/pdf.js"),
+      parsedItemSeparator: "\n\n",
+    });
+  } else {
+    // Local file path on disk
+    loader = new PDFLoader(fileUrl, { parsedItemSeparator: "\n\n" });
+  }
+
+  const pages = await loader.load();
+
+  const chunkSize = options.chunkSize ?? this.embeddingConfig.chunkSize;
+  const chunkOverlap = options.chunkOverlap ?? this.embeddingConfig.chunkOverlap;
+
+  const { RecursiveCharacterTextSplitter } = await import("@pinecone-database/doc-splitter");
+  const splitter = new RecursiveCharacterTextSplitter({
+    chunkSize,
+    chunkOverlap,
+    separators: ["\n\n", "\n", ".", "!", "?", ";", ",", " ", ""],
+  });
+
+  const pageDocs = pages.map(
+    (p, i) =>
+      new Document({
+        pageContent: this.preprocessText(p.pageContent.replace(/\n/g, " ").trim()),
+        metadata: { pageNumber: p.metadata?.loc?.pageNumber || i + 1, documentId },
+      })
+  );
+
+  const chunks = await splitter.splitDocuments(pageDocs);
+  const docs = chunks.map((c, idx) =>
+    this.makeDoc(c.pageContent, { ...c.metadata, chunkIndex: idx, documentId })
+  );
+
+  const store = await this.getStore(documentId);
+  const ids: string[] = [];
+  const batchSize = this.embeddingConfig.batchSize;
+
+  for (let i = 0; i < docs.length; i += batchSize) {
+    const batch = docs.slice(i, i + batchSize);
+    const res = await store.addDocuments(batch, {
+      ids: batch.map((_, j) => `${documentId}_chunk_${i + j}`),
+    });
+    ids.push(...res);
+    if (i > 0) await new Promise(r => setTimeout(r, 300));
+  }
+
+  return ids;
+}
+
+  public async advancedSearch(
+    query: string,
+    options: {
+      namespace?: string;
+      filters?: Record<string, any>;
+      topK?: number;
+      useReranking?: boolean;
+      modelKey?: ModelKey;
+      rerankingThreshold?: number;
+      chunkTypes?: Array<"title" | "paragraph" | "list" | "table">;
+      dateRange?: { start: number; end: number };
+    } = {}
+  ) {
+    const {
+      namespace = MemoryManager.KNOWLEDGE_BASE_NAMESPACE,
+      filters = {},
+      topK = 5,
+      useReranking = false,
+      modelKey,
+      rerankingThreshold,
+      chunkTypes,
+      dateRange,
+    } = options;
+
+    try {
+      const store = await this.getStore(namespace);
+
+      const simpleFilter: Record<string, any> = { ...filters };
+      if (chunkTypes?.length === 1) simpleFilter.chunkType = chunkTypes[0];
+      if (dateRange) {
+        simpleFilter.timestamp = { gte: dateRange.start, lte: dateRange.end };
+      }
+
+      const k = useReranking ? Math.min(topK * 2, 20) : topK;
+      const results = await store.similaritySearchWithScore(query, k, this.embeddingConfig.enableMetadataFiltering ? simpleFilter : undefined);
+
+      const docs = results.map(([doc, score]) => {
+        doc.metadata = { ...doc.metadata, searchScore: score };
+        return doc;
+      });
+
+      if (useReranking && docs.length > 1) {
+        const rer = await this.rerankDocuments(query, docs, modelKey, rerankingThreshold);
+        return { documents: rer.slice(0, topK).map((r) => r.document), rerankingResults: rer.slice(0, topK) };
+      }
+
+      return { documents: docs.slice(0, topK), rerankingResults: [] };
+    } catch (err) {
+      console.warn("advancedSearch failed", err);
+      return { documents: [], rerankingResults: [] };
+    }
+  }
+
+  public async writeToGeneralChatHistory(text: string, chatKey: GeneralChatKey) {
+    if (!chatKey?.userId) {
+      console.warn("Chat key set incorrectly");
+      return "";
+    }
+
+    const key = this.generateRedisGeneralChatKey(chatKey);
+    const result = await this.history.zadd(key, { score: Date.now(), member: text });
+
+    try {
+      const store = await this.getStore(`${MemoryManager.GENERAL_CHAT_PREFIX}-${chatKey.userId}`);
+      const doc = this.makeDoc(text, {
+        userMsg: text.startsWith("User:"),
+        chatSession: chatKey.sessionId || "default",
+        userId: chatKey.userId,
+        modelName: chatKey.modelName,
+        timestamp: Date.now(),
+      });
+      await store.addDocuments([doc]);
+    } catch (err) {
+      console.warn("Vector add failed (chat history):", err);
+    }
+
+    return result;
+  }
+
+  public async readLatestHistory(documentKey: DocumentKey): Promise<string> {
+    if (!documentKey?.userId) return "";
+    const key = this.generateRedisDocumentKey(documentKey);
+    const result = await this.history.zrange(key, 0, Date.now(), { byScore: true });
+    const recent = result.slice(-30).reverse();
+    return recent.join("\n");
+  }
+
+  public async readLatestGeneralChatHistory(chatKey: GeneralChatKey): Promise<string> {
+    if (!chatKey?.userId) return "";
+    const key = this.generateRedisGeneralChatKey(chatKey);
+    const result = await this.history.zrange(key, 0, Date.now(), { byScore: true });
+    const recent = result.slice(-30).reverse();
+    return recent.join("\n");
+  }
+
+  public async vectorSearch(
+    query: string,
+    documentNamespace: string,
+    filterUserMessages: boolean,
+    useReranking = false,
+    modelKey?: ModelKey,
+    rerankingThreshold?: number
+  ) {
+    try {
+      const store = await this.getStore(documentNamespace);
+      const filter = this.embeddingConfig.enableMetadataFiltering ? (filterUserMessages ? { userMsg: true } : undefined) : undefined;
+
+      const k = useReranking ? 10 : 10;
+      const docs = await store.similaritySearch(query, k, filter);
+
+      if (useReranking && docs.length > 1) {
+        const rer = await this.rerankDocuments(query, docs, modelKey, rerankingThreshold);
+        return { documents: rer.map((r) => r.document), rerankingResults: rer };
+      }
+
+      return { documents: docs, rerankingResults: [] };
+    } catch (err) {
+      console.warn("vectorSearch failed", err);
+      return { documents: [], rerankingResults: [] };
+    }
+  }
+
+  public async knowledgeBaseSearch(
+    query: string,
+    topK = 5,
+    filters?: Record<string, any>,
+    useReranking = false,
+    modelKey?: ModelKey,
+    rerankingThreshold?: number
+  ) {
+    try {
+      const store = await this.getStore(MemoryManager.KNOWLEDGE_BASE_NAMESPACE);
+      const simpleFilter = this.embeddingConfig.enableMetadataFiltering ? { ...(filters || {}) } : undefined;
+      const k = Math.min(useReranking ? topK * 2 : topK, 20);
+      const res = await store.similaritySearchWithScore(query, k, simpleFilter);
+
+      const docs = res.map(([doc, score]) => {
+        doc.metadata = { ...doc.metadata, searchScore: score };
+        return doc;
+      });
+
+      if (useReranking && docs.length > 1) {
+        const rer = await this.rerankDocuments(query, docs, modelKey, rerankingThreshold);
+        return { documents: rer.slice(0, topK).map((r) => r.document), rerankingResults: rer.slice(0, topK) };
+      }
+      return { documents: docs.slice(0, topK), rerankingResults: [] };
+    } catch (err) {
+      console.warn("knowledgeBaseSearch failed", err);
+      return { documents: [], rerankingResults: [] };
+    }
+  }
+
+  public async searchSimilarConversations(
+    query: string,
+    userId: string,
+    topK = 3,
+    useReranking = false,
+    modelKey?: ModelKey,
+    rerankingThreshold?: number
+  ) {
+    try {
+      const ns = `${MemoryManager.GENERAL_CHAT_PREFIX}-${userId}`;
+      const store = await this.getStore(ns);
+      const filter = this.embeddingConfig.enableMetadataFiltering ? { userId } : undefined;
+      const k = Math.min(useReranking ? topK * 2 : topK, 10);
+      const docs = await store.similaritySearch(query, k, filter);
+
+      if (useReranking && docs.length > 1) {
+        const rer = await this.rerankDocuments(query, docs, modelKey, rerankingThreshold);
+        return { documents: rer.slice(0, topK).map((r) => r.document), rerankingResults: rer.slice(0, topK) };
+      }
+      return { documents: docs.slice(0, topK), rerankingResults: [] };
+    } catch (err) {
+      console.warn("searchSimilarConversations failed", err);
+      return { documents: [], rerankingResults: [] };
+    }
+  }
+
+  public async rerankDocuments(
+    query: string,
+    documents: Document[],
+    modelKey: ModelKey = "deepseek-r1:7b",
+    threshold: number = 0.5
+  ): Promise<RerankingResult[]> {
+    if (!documents.length) return [];
+    try {
+      const model = new ChatOllama({
+        baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
+        model: modelKey,
+        temperature: 0.1,
+        keepAlive: "10m",
+      });
+
+      const results: RerankingResult[] = [];
+      const batchSize = 5;
+
+      for (let i = 0; i < documents.length; i += batchSize) {
+        const batch = documents.slice(i, i + batchSize);
+        const prompt =
+          `Query: "${query}"\n\nRate each document 0.0-1.0\n` +
+          batch
+            .map(
+              (doc, idx) =>
+                `Document ${i + idx + 1}:\n${String(doc.pageContent).slice(0, 700)}\n`
+            )
+            .join("\n") +
+          `\nReply with lines "Document N: 0.X"`; // keep it dead simple
+
+        const resp = await model.invoke([new SystemMessage(SYSTEM_PROMPTS.reranking), new HumanMessage(prompt)]);
+        const lines = String(resp.content).trim().split(/\n+/);
+        const scores = lines
+          .map((l) => parseFloat(l.split(":").pop()!.trim()))
+          .filter((n) => !isNaN(n));
+
+        batch.forEach((doc, j) => {
+          const s = scores[j] ?? 0.5;
+          if (s >= threshold) {
+            results.push({
+              document: doc,
+              relevanceScore: s,
+              originalRank: i + j,
+              newRank: -1,
+            });
+          }
+        });
+      }
+
+      results.sort((a, b) => b.relevanceScore - a.relevanceScore);
+      results.forEach((r, idx) => (r.newRank = idx));
+      return results;
+    } catch (err) {
+      console.warn("Reranking failed; returning neutral ranks", err);
+      return documents.map((d, i) => ({
+        document: d,
+        relevanceScore: 0.5,
+        originalRank: i,
+        newRank: i,
+      }));
+    }
+  }
+
+  public async writeToHistory(text: string, documentKey: DocumentKey) {
+    if (!documentKey?.userId) return "";
+    const key = this.generateRedisDocumentKey(documentKey);
+    const res = await this.history.zadd(key, { score: Date.now(), member: text });
+
+    try {
+      const store = await this.getStore(documentKey.documentName);
+      const doc = this.makeDoc(text, {
+        userMsg: text.startsWith("User:"),
+        documentId: documentKey.documentName,
+        userId: documentKey.userId,
+        modelName: documentKey.modelName,
+      });
+      await store.addDocuments([doc]);
+    } catch (err) {
+      console.warn("Vector add failed (doc history):", err);
+    }
+    return res;
+  }
+
+  private generateRedisDocumentKey(documentKey: DocumentKey) {
+    return `${documentKey.documentName}-${documentKey.modelName}-${documentKey.userId}`;
+  }
+
+  private generateRedisGeneralChatKey(chatKey: GeneralChatKey) {
+    const sessionId = chatKey.sessionId || "default";
+    return `${MemoryManager.GENERAL_CHAT_PREFIX}-${chatKey.userId}-${chatKey.modelName}-${sessionId}`;
+  }
+
+  public async ensureEmbeddingModelsAvailable(): Promise<boolean> {
+    try {
+      await pullOllamaModels([this.embeddingConfig.model], this.embeddingConfig.baseUrl);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/* ------------------------- Database Query Executor ------------------------- */
+
+class DatabaseQueryExecutor {
   private modelKey: ModelKey;
   private includePerformanceMetrics: boolean;
 
-  constructor(modelKey: ModelKey, includePerformanceMetrics: boolean = false) {
+  constructor(modelKey: ModelKey, includePerformanceMetrics = false) {
     this.modelKey = modelKey;
     this.includePerformanceMetrics = includePerformanceMetrics;
   }
 
-  private createModel(temperature: number = 0.0): ChatOllama {
+  private createModel(temperature = 0.0): ChatOllama {
     return new ChatOllama({
       baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
       model: this.modelKey,
@@ -177,269 +753,209 @@ export class DatabaseQueryExecutor {
 
   private extractSQLFromResponse(response: string): string | null {
     const strategies = [
-      { regex: /```sql\n([\s\S]*?)\n```/gi, group: 1 },
-      { regex: /```\n(SELECT[\s\S]*?)\n```/gi, group: 1 },
-      { regex: /^\s*(SELECT[\s\S]*?)(?=\n\n|$)/gmi, group: 1 },
-      { regex: /(SELECT[\s\S]*?);?\s*$/gmi, group: 1 },
-      { regex: /SQL Query:?\s*\n?(SELECT[\s\S]*?)(?=\n[A-Z]|\n\n|$)/gi, group: 1 },
-      { regex: /Query:?\s*\n?(SELECT[\s\S]*?)(?=\n[A-Z]|\n\n|$)/gi, group: 1 },
+      /```sql\s*([\s\S]*?)```/i,
+      /```\s*(SELECT[\s\S]*?)```/i,
+      /^\s*(SELECT[\s\S]*?)\s*$/im,
+      /(SELECT[\s\S]*?);?\s*$/im,
     ];
-
-    for (const { regex, group } of strategies) {
-      const matches = [...response.matchAll(regex)];
-      for (const match of matches) {
-        const sql = (match[group] || match[0]).trim();
-        if (sql.toUpperCase().startsWith("SELECT") && sql.length > 20) {
-          return sql.replace(/;$/, "");
-        }
+    for (const re of strategies) {
+      const m = response.match(re);
+      if (m?.[1]) {
+        const sql = m[1].trim().replace(/;$/, "");
+        if (/^SELECT\s/i.test(sql) && sql.length > 20) return sql;
       }
     }
     return null;
   }
 
   private getQueryComplexity(sqlQuery: string): "low" | "medium" | "high" {
-    const hasJoin = sqlQuery.includes("JOIN");
-    const hasGroupBy = sqlQuery.includes("GROUP BY");
-
-    if (hasJoin && hasGroupBy) return "high";
-    if (hasJoin || hasGroupBy) return "medium";
+    const q = sqlQuery.toUpperCase();
+    const hasJoin = q.includes(" JOIN ");
+    const hasGroup = q.includes(" GROUP BY ");
+    if (hasJoin && hasGroup) return "high";
+    if (hasJoin || hasGroup) return "medium";
     return "low";
   }
 
   private async generateSummary(userMessage: string, data: Record<string, any>[]): Promise<string> {
-    if (!data.length) return "";
-
+    if (!data?.length) return "";
     try {
-      const summaryModel = this.createModel(0.2);
-      const summaryPrompt = `Analyze these query results and provide 2-3 key insights in business language.
+      const model = this.createModel(0.2);
+      const prompt = `Summarize 2-3 insights in business language.
 
-User Question: ${userMessage}
-Results Count: ${data.length}
-Sample Data: ${JSON.stringify(data.slice(0, 2), null, 2)}
+Question: ${userMessage}
+Rows: ${data.length}
+Sample: ${JSON.stringify(data.slice(0, 2), null, 2)}
 
-Focus on:
-- Key numbers and trends
-- Notable patterns or outliers
-- Business implications
-- Actionable insights
+Focus on key numbers, patterns, and actions. Keep it short:`;
 
-Keep it concise and professional:`;
-
-      const summaryResponse = await summaryModel.invoke([new HumanMessage(summaryPrompt)]);
-      return String(summaryResponse.content);
+      const resp = await model.invoke([new HumanMessage(prompt)]);
+      return String(resp.content);
     } catch {
-      return `Query executed successfully, returning ${data.length} results with ${Object.keys(data[0] || {}).length} data points per record.`;
+      return `Query OK: ${data.length} rows, ${Object.keys(data[0] || {}).length} columns.`;
     }
   }
 
   async executeQuery(userMessage: string): Promise<DatabaseQueryResult> {
-    const startTime = Date.now();
-
+    const start = Date.now();
     try {
-      // Try tool-based approach first for better results
-      const toolResult = await this.executeWithTools(userMessage);
-      if (toolResult.success && toolResult.data?.length) {
+      const toolRes = await this.executeWithTools(userMessage);
+      if (toolRes.success && toolRes.data?.length) {
         return {
-          ...toolResult,
-          performance: this.includePerformanceMetrics ? {
-            executionTime: Date.now() - startTime,
-            rowCount: toolResult.data.length,
-            queryComplexity: this.getQueryComplexity(toolResult.sqlQuery || ""),
-          } : undefined,
+          ...toolRes,
+          performance: this.includePerformanceMetrics
+            ? {
+                executionTime: Date.now() - start,
+                rowCount: toolRes.data.length,
+                queryComplexity: this.getQueryComplexity(toolRes.sqlQuery || ""),
+              }
+            : undefined,
         };
       }
-
-      // Fallback to legacy method
       return this.executeWithLegacyMethod(userMessage);
-    } catch (error: any) {
+    } catch (err: any) {
       return {
         success: false,
-        error: `Database query execution failed: ${error.message}`,
-        performance: this.includePerformanceMetrics ? {
-          executionTime: Date.now() - startTime,
-          rowCount: 0,
-          queryComplexity: "medium"
-        } : undefined,
+        error: `Database query failed: ${err.message}`,
+        performance: this.includePerformanceMetrics
+          ? { executionTime: Date.now() - start, rowCount: 0, queryComplexity: "medium" }
+          : undefined,
       };
     }
   }
 
   private async executeWithTools(userMessage: string): Promise<DatabaseQueryResult> {
-    // Implementation similar to your existing executeWithTools method
-    // This is a simplified version - you can expand based on your full implementation
     try {
       const model = this.createModel(0.1);
 
-      // List tables
-      const tablesResult = await listTables.invoke({
-        reasoning: `User wants: "${userMessage}". Need to identify relevant tables.`,
+      // If these are LangChain Tools, they often return objects already:
+      const tablesResult: any = await listTables.invoke({
+        reasoning: `User wants: "${userMessage}". Identify relevant tables.`,
       });
 
-      // Parse and select relevant tables
-      const tables = JSON.parse(tablesResult);
-      let targetTable = "";
+      const tables: string[] =
+        Array.isArray(tablesResult)
+          ? tablesResult.map((t: any) => (typeof t === "string" ? t : t.name)).filter(Boolean)
+          : JSON.parse(typeof tablesResult === "string" ? tablesResult : "[]");
+
       const lower = userMessage.toLowerCase();
+      const pick = (kw: string) => tables.find((t) => t.toLowerCase().includes(kw));
+      const tableName = pick("airline") || pick("airport") || pick("flight") || tables[0];
 
-      if (lower.includes("airline")) targetTable = tables.find((t: any) => (t.name || t).toLowerCase().includes("airline"));
-      else if (lower.includes("airport")) targetTable = tables.find((t: any) => (t.name || t).toLowerCase().includes("airport"));
-      else if (lower.includes("flight")) targetTable = tables.find((t: any) => (t.name || t).toLowerCase().includes("flight"));
+      if (!tableName) throw new Error("No suitable table found");
 
-      if (!targetTable && tables.length > 0) targetTable = tables[0];
-
-      const tableName = typeof targetTable === "string" ? targetTable : targetTable?.name;
-
-      if (!tableName) {
-        throw new Error("No suitable table found");
-      }
-
-      // Get table structure
-      const structureResult = await describeTable.invoke({
+      const structureResult: any = await describeTable.invoke({
         reasoning: `Need structure for ${tableName}`,
         table_name: tableName,
         include_indexes: false,
       });
 
-      // Generate SQL
-      const sqlPrompt = `Generate a SELECT query for: "${userMessage}"
+      const structureText =
+        typeof structureResult === "string" ? structureResult : JSON.stringify(structureResult, null, 2);
 
-Table structure:
-${structureResult}
+      const sqlPrompt = `Generate a SELECT for: "${userMessage}"
+
+Table: ${tableName}
+Structure (for column names):
+${structureText}
 
 Rules:
-- Use only confirmed column names
-- Include LIMIT 50
-- Generate only the SQL, no explanations
+- Use only real columns
+- LIMIT 50
+- Output ONLY SQL (no markdown, no prose)`;
 
-SQL:`;
+      const sqlResp = await model.invoke([new HumanMessage(sqlPrompt)]);
+      const sql = this.extractSQLFromResponse(String(sqlResp.content)) || String(sqlResp.content).trim();
 
-      const sqlResponse = await model.invoke([new HumanMessage(sqlPrompt)]);
-      const sqlQuery = this.extractSQLFromResponse(String(sqlResponse.content));
+      if (!/^SELECT\s/i.test(sql)) throw new Error("No valid SELECT generated");
 
-      if (!sqlQuery) {
-        throw new Error("Could not generate valid SQL");
-      }
-
-      // Execute query
-      const executeResult = await executeSql.invoke({
+      const execRes: any = await executeSql.invoke({
         reasoning: `Execute query for: "${userMessage}"`,
-        sql_query: sqlQuery,
+        sql_query: sql,
         explain_plan: false,
       });
 
-      const parsed = JSON.parse(executeResult);
+      const parsed = typeof execRes === "string" ? JSON.parse(execRes) : execRes;
 
-      if (parsed.success && parsed.data) {
+      if (parsed?.success && parsed.data) {
         const summary = await this.generateSummary(userMessage, parsed.data);
-        return {
-          success: true,
-          data: parsed.data,
-          sqlQuery,
-          summary,
-        };
+        return { success: true, data: parsed.data, sqlQuery: sql, summary };
       }
-
-      return {
-        success: false,
-        error: parsed.error || "Query execution failed",
-        sqlQuery,
-      };
-    } catch (error: any) {
-      return {
-        success: false,
-        error: `Database exploration failed: ${error.message}`,
-      };
+      return { success: false, error: parsed?.error || "Query execution failed", sqlQuery: sql };
+    } catch (err: any) {
+      return { success: false, error: `Database exploration failed: ${err.message}` };
     }
   }
 
   private async executeWithLegacyMethod(userMessage: string): Promise<DatabaseQueryResult> {
-    const startTime = Date.now();
-
+    const start = Date.now();
     try {
       const model = this.createModel();
-      const queryPrompt = `${generateQueryPrompt(userMessage)}
+      const prompt = `${generateQueryPrompt(userMessage)}
 
-CONTEXT: User is asking about: "${userMessage}"
+CONTEXT: "${userMessage}"
 REQUIREMENTS:
-- Generate ONLY the SQL query, no explanations or markdown
-- Must be a valid SELECT statement with proper syntax
-- Include appropriate JOINs for related data
-- Add proper WHERE clauses for filtering
-- Include ORDER BY for logical result ordering
-- Always end with LIMIT clause (max 100 rows)
+- Output ONLY SQL (no markdown)
+- Must be a valid SELECT
+- Proper JOINs and WHERE
+- ORDER BY logically
+- LIMIT <= 100
 
-SQL Query:`;
+SQL:`;
 
-      const sqlResponse = await model.invoke([
-        new SystemMessage(SYSTEM_PROMPTS.databaseExpert),
-        new HumanMessage(queryPrompt)
-      ]);
-
-      const sqlQuery = this.extractSQLFromResponse(String(sqlResponse.content));
-      if (!sqlQuery) {
+      const sqlResp = await model.invoke([new SystemMessage(SYSTEM_PROMPTS.databaseExpert), new HumanMessage(prompt)]);
+      const sql = this.extractSQLFromResponse(String(sqlResp.content)) || String(sqlResp.content).trim();
+      if (!/^SELECT\s/i.test(sql)) {
         return {
           success: false,
-          error: "Unable to generate valid SQL query",
-          performance: this.includePerformanceMetrics ? {
-            executionTime: Date.now() - startTime,
-            rowCount: 0,
-            queryComplexity: "low"
-          } : undefined,
+          error: "Unable to generate valid SQL",
+          performance: this.includePerformanceMetrics
+            ? { executionTime: Date.now() - start, rowCount: 0, queryComplexity: "low" }
+            : undefined,
         };
       }
 
-      const toolResult = await executeSql.invoke({
+      const toolResult: any = await executeSql.invoke({
         reasoning: `Execute query for: ${userMessage}`,
-        sql_query: sqlQuery,
+        sql_query: sql,
         explain_plan: this.includePerformanceMetrics,
       });
 
-      if (typeof toolResult !== "string" || /^⚠️|^Error|Writes are disabled/i.test(toolResult)) {
-        return {
-          success: false,
-          sqlQuery,
-          error: typeof toolResult === "string" ? toolResult : "Unexpected database response format",
-        };
+      const parsed = typeof toolResult === "string" ? JSON.parse(toolResult) : toolResult;
+      if (!parsed?.success || !parsed.data) {
+        return { success: false, sqlQuery: sql, error: parsed?.error || "No data returned" };
       }
 
-      const parsedResult = JSON.parse(toolResult);
-
-      if (!parsedResult.success || !parsedResult.data) {
-        return {
-          success: false,
-          sqlQuery,
-          error: parsedResult.error || "No data returned from query",
-        };
-      }
-
-      const data = parsedResult.data as Record<string, any>[];
+      const data = parsed.data as Record<string, any>[];
       const summary = await this.generateSummary(userMessage, data);
 
       return {
         success: true,
         data,
-        sqlQuery,
+        sqlQuery: sql,
         summary,
-        performance: this.includePerformanceMetrics ? {
-          executionTime: Date.now() - startTime,
-          rowCount: data.length,
-          queryComplexity: this.getQueryComplexity(sqlQuery)
-        } : undefined,
+        performance: this.includePerformanceMetrics
+          ? {
+              executionTime: Date.now() - start,
+              rowCount: data.length,
+              queryComplexity: this.getQueryComplexity(sql),
+            }
+          : undefined,
       };
-    } catch (error: any) {
+    } catch (err: any) {
       return {
         success: false,
-        error: `Database query execution failed: ${error.message}`,
-        performance: this.includePerformanceMetrics ? {
-          executionTime: Date.now() - startTime,
-          rowCount: 0,
-          queryComplexity: "medium"
-        } : undefined,
+        error: `Database query failed: ${err.message}`,
+        performance: this.includePerformanceMetrics
+          ? { executionTime: Date.now() - start, rowCount: 0, queryComplexity: "medium" }
+          : undefined,
       };
     }
   }
 }
 
-// Main AI Agent Class
+/* ------------------------------- Main Agent ------------------------------- */
+
 export class AIAgent {
   private config: Required<AgentConfig>;
   private memoryManager?: MemoryManager;
@@ -448,294 +964,313 @@ export class AIAgent {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  // Initialize memory manager if needed
   private async initializeMemory(): Promise<void> {
     if (this.config.useMemory && !this.memoryManager) {
       this.memoryManager = await MemoryManager.getInstance();
     }
   }
 
-  // Create configured model instance
-  private createModel(): ChatOllama {
-    const modelConfig = AVAILABLE_MODELS[this.config.modelKey];
-
+  private createModel(opts?: { forceStreaming?: boolean }): ChatOllama {
+    const modelConf = AVAILABLE_MODELS[this.config.modelKey];
     return new ChatOllama({
       baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
       model: this.config.modelKey,
       temperature: this.config.temperature,
-      streaming: this.config.streaming,
+      streaming: opts?.forceStreaming ?? this.config.streaming,
       keepAlive: "10m",
       numCtx: this.config.contextWindow,
-      timeout: this.config.timeout,
     });
   }
 
-  // Authentication and rate limiting wrapper
   async authenticate(request: Request): Promise<{ user: any; rateLimitOk: boolean }> {
     const user = await currentUser();
-    if (!user?.id) {
-      throw new Error("Authentication required");
-    }
-
+    if (!user?.id) throw new Error("Authentication required");
     const identifier = `${request.url}-${user.id}`;
-    const { success: rateLimitOk } = await rateLimit(identifier);
-
-    return { user, rateLimitOk };
+    const { success } = await rateLimit(identifier);
+    return { user, rateLimitOk: success };
   }
 
-  // Generate response for general chat
-  async generateChatResponse(
-    message: string,
-    context: AgentContext,
-    additionalContext?: string
-  ): Promise<AgentResponse> {
-    const startTime = Date.now();
+  private truncateContexts(contexts: any, maxLength: number): any {
+    const truncated = { ...contexts };
+    let total = 0;
+    Object.values(contexts).forEach((c: any) => {
+      if (typeof c === "string") total += c.length;
+      else if (c?.summary) total += String(c.summary).length;
+    });
+    if (total <= maxLength) return truncated;
+
+    const priorities = ["database", "knowledge", "conversation", "similar"] as const;
+    const target = Math.floor(maxLength * 0.9);
+
+    for (const k of priorities) {
+      if (typeof truncated[k] === "string") {
+        const text = truncated[k] as string;
+        const allowance = Math.max(200, Math.floor(target * 0.3)); // cap per section
+        if (text.length > allowance) {
+          const sentences = text.split(/[.!?]+/);
+          let acc = "";
+          for (const s of sentences) {
+            if ((acc + s + ".").length <= allowance) acc += s + ".";
+            else break;
+          }
+          truncated[k] = acc || text.slice(0, allowance);
+        }
+      }
+    }
+    return truncated;
+  }
+
+  async generateChatResponse(message: string, context: AgentContext, additionalContext?: string): Promise<AgentResponse> {
+    const start = Date.now();
     await this.initializeMemory();
 
-    const chatKey = {
+    const chatKey: GeneralChatKey = {
       userId: context.userId,
       modelName: this.config.modelKey,
       sessionId: context.sessionId || uuidv4(),
     };
 
-    // Detect if this is a database query
-    const dbQueryDetection = isDatabaseQuery(message);
-    const shouldQueryDatabase = this.config.useDatabase && dbQueryDetection.isDbQuery;
+    const dbDetection = isDatabaseQuery(message);
+    const shouldQueryDB = this.config.useDatabase && dbDetection.isDbQuery;
 
-    const contexts: AgentResponse['contexts'] = {};
+    const contexts: AgentResponse["contexts"] = {};
+    let rerankingApplied = false;
+    const allReranked: RerankingResult[] = [];
 
-    // Gather contexts in parallel
-    const contextPromises: Promise<void>[] = [];
+    const tasks: Promise<void>[] = [];
 
-    // Database context
-    if (shouldQueryDatabase) {
-      contextPromises.push(
+    if (shouldQueryDB) {
+      tasks.push(
         (async () => {
           try {
-            const executor = new DatabaseQueryExecutor(this.config.modelKey, false);
-            contexts.database = await executor.executeQuery(message);
-          } catch (error) {
-            console.warn("Database query failed:", error);
+            const exec = new DatabaseQueryExecutor(this.config.modelKey, false);
+            contexts.database = await exec.executeQuery(message);
+          } catch (e) {
+            console.warn("DB query failed", e);
           }
         })()
       );
     }
 
-    // Knowledge base context
     if (this.config.useKnowledgeBase && this.memoryManager) {
-      contextPromises.push(
+      tasks.push(
         (async () => {
           try {
-            const knowledgeResults = await this.memoryManager!.knowledgeBaseSearch(message, 5);
-            contexts.knowledge = knowledgeResults
-              ?.map(doc => doc.pageContent)
-              .join("\n---\n")
-              .slice(0, 4000);
-          } catch (error) {
-            console.warn("Knowledge base search failed:", error);
+            const search = await this.memoryManager!.knowledgeBaseSearch(
+              message,
+              5,
+              {},
+              this.config.useReranking,
+              this.config.modelKey,
+              this.config.rerankingThreshold
+            );
+            contexts.knowledge = search.documents.map((d) => d.pageContent).join("\n---\n").slice(0, 4000);
+            if (search.rerankingResults.length) {
+              allReranked.push(...search.rerankingResults);
+              rerankingApplied = true;
+            }
+          } catch (e) {
+            console.warn("KB search failed", e);
           }
         })()
       );
     }
 
-    // Conversation history
     if (this.config.useMemory && this.memoryManager) {
-      contextPromises.push(
+      tasks.push(
         (async () => {
           try {
             contexts.conversation = await this.memoryManager!.readLatestGeneralChatHistory(chatKey);
-
-            // Also get similar conversations
-            const similarResults = await this.memoryManager!.searchSimilarConversations(
+            const similar = await this.memoryManager!.searchSimilarConversations(
               message,
               context.userId,
-              3
+              3,
+              this.config.useReranking,
+              this.config.modelKey,
+              this.config.rerankingThreshold
             );
-            contexts.similar = similarResults
-              ?.filter(doc => doc.metadata?.chatSession !== context.sessionId)
-              .map(doc => doc.pageContent)
+            contexts.similar = similar.documents
+              ?.filter((d: any) => d.metadata?.chatSession !== context.sessionId)
+              .map((d) => d.pageContent)
               .join("\n---\n")
               .slice(0, 1500);
-          } catch (error) {
-            console.warn("Memory operations failed:", error);
+            if (similar.rerankingResults.length) {
+              allReranked.push(...similar.rerankingResults);
+              rerankingApplied = true;
+            }
+          } catch (e) {
+            console.warn("Memory ops failed", e);
           }
         })()
       );
     }
 
-    await Promise.all(contextPromises);
+    await Promise.all(tasks);
 
-    // Build system prompt
-    let systemPrompt = `${SYSTEM_PROMPTS.chat}
+    const truncated = this.truncateContexts(contexts, this.config.maxContextLength);
 
-User Context: ${context.userName || "User"}
-Detection Confidence: ${(dbQueryDetection.confidence * 100).toFixed(1)}% database-related query`;
+    let systemPrompt =
+      `${SYSTEM_PROMPTS.chat}\n` +
+      `User: ${context.userName || "User"}\n` +
+      `Detection: ${(dbDetection.confidence * 100).toFixed(1)}% db-related\n` +
+      `Reranking: ${rerankingApplied ? "Yes" : "No"}`;
 
-    // Add database results if available
-    if (contexts.database?.success && contexts.database.data?.length) {
-      const sampleData = contexts.database.data.slice(0, 5);
-      systemPrompt += `\n\nLIVE DATABASE RESULTS:
-Query: ${message}
-SQL: ${contexts.database.sqlQuery}
-Results: ${contexts.database.data.length} records found
-Key Data: ${JSON.stringify(sampleData, null, 2)}
-${contexts.database.data.length > 5 ? `... plus ${contexts.database.data.length - 5} more records` : ""}
+    if (truncated.database?.success && truncated.database.data?.length) {
+      const sample = truncated.database.data.slice(0, 5);
+      const summarySafe = String(truncated.database.summary || "").slice(0, 1200);
+      systemPrompt += `
 
-Business Summary: ${contexts.database.summary}
+LIVE DATABASE RESULTS:
+SQL: ${truncated.database.sqlQuery}
+Rows: ${truncated.database.data.length}
+Sample: ${JSON.stringify(sample, null, 2).slice(0, 1800)}
+Business Summary: ${summarySafe}
 
-Instructions: Use this REAL data to answer the user's question with specific numbers and facts.`;
-    } else if (contexts.database?.error && shouldQueryDatabase) {
-      systemPrompt += `\n\nDATABASE QUERY ATTEMPTED:
-SQL: ${contexts.database.sqlQuery || "Unable to generate"}
-Error: ${contexts.database.error}
-Note: Current live data unavailable, provide general guidance if possible.`;
+Use these real numbers in the answer.`;
+    } else if (truncated.database?.error && shouldQueryDB) {
+      systemPrompt += `
+
+DATABASE QUERY ATTEMPTED:
+SQL: ${truncated.database.sqlQuery || "n/a"}
+Error: ${truncated.database.error}
+Give general guidance if possible.`;
     }
 
-    // Add other contexts
-    if (contexts.knowledge) systemPrompt += `\n\nKNOWLEDGE BASE:\n${contexts.knowledge}`;
-    if (contexts.conversation) systemPrompt += `\n\nCONVERSATION HISTORY:\n${contexts.conversation}`;
-    if (contexts.similar) systemPrompt += `\n\nRELATED DISCUSSIONS:\n${contexts.similar}`;
-    if (additionalContext) systemPrompt += `\n\nADDITIONAL CONTEXT:\n${additionalContext}`;
-    if (!contexts.database && shouldQueryDatabase) systemPrompt += `\n\nDATABASE SCHEMA (Reference):\n${DATABASE_SCHEMA}`;
+    if (truncated.knowledge) systemPrompt += `\n\nKNOWLEDGE${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.knowledge}`;
+    if (truncated.conversation) systemPrompt += `\n\nHISTORY:\n${truncated.conversation}`;
+    if (truncated.similar) systemPrompt += `\n\nRELATED${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.similar}`;
+    if (additionalContext) systemPrompt += `\n\nADDITIONAL:\n${additionalContext}`;
+    if (!truncated.database && shouldQueryDB) systemPrompt += `\n\nSCHEMA:\n${DATABASE_SCHEMA}`;
 
-    systemPrompt += `\n\nCurrent Question: ${message.trim()}`;
+    systemPrompt += `\n\nQuestion: ${message.trim()}`;
 
-    // Generate response
     const model = this.createModel();
-    const response = await model.invoke([
-      new SystemMessage(systemPrompt),
-      new HumanMessage(message)
-    ]);
+    const resp = await model.invoke([new SystemMessage(systemPrompt), new HumanMessage(message)]);
+    const content = String(resp.content || "");
 
-    const content = String(response.content || "");
-
-    // Save to memory
     if (this.config.useMemory && this.memoryManager) {
       try {
         await this.memoryManager.writeToGeneralChatHistory(`User: ${message}\n`, chatKey);
-
-        let savedResponse = `Assistant: ${content}`;
-        if (contexts.database?.success && contexts.database.sqlQuery) {
-          savedResponse += `\n[Query: ${contexts.database.sqlQuery}]`;
-        }
-        await this.memoryManager.writeToGeneralChatHistory(savedResponse, chatKey);
-      } catch (error) {
-        console.warn("Failed to save to memory:", error);
+        let save = `Assistant: ${content}`;
+        if (truncated.database?.success && truncated.database.sqlQuery) save += `\n[Query: ${truncated.database.sqlQuery}]`;
+        await this.memoryManager.writeToGeneralChatHistory(save, chatKey);
+      } catch (e) {
+        console.warn("save to memory failed", e);
       }
     }
 
-    const contextSources = [
-      contexts.database ? "database" : null,
-      contexts.knowledge ? "knowledge" : null,
-      contexts.conversation ? "history" : null,
-      contexts.similar ? "similar" : null,
+    const sources = [
+      truncated.database ? "database" : null,
+      truncated.knowledge ? "knowledge" : null,
+      truncated.conversation ? "history" : null,
+      truncated.similar ? "similar" : null,
     ].filter(Boolean) as string[];
+
+    if (allReranked.length) truncated.rerankedResults = allReranked;
+
+    const totalTokens = systemPrompt.length + content.length;
 
     return {
       content,
       model: this.config.modelKey,
       executionTime: Date.now() - startTime,
-      contexts,
+      contexts: truncated,
       metadata: {
-        sessionId: context.sessionId || chatKey.sessionId,
-        dbQueryDetected: shouldQueryDatabase,
-        dbQueryConfidence: dbQueryDetection.confidence,
-        contextSources,
+        sessionId: context.sessionId || chatKey.sessionId!,
+        dbQueryDetected: shouldQueryDB,
+        dbQueryConfidence: dbDetection.confidence,
+        contextSources: sources,
+        rerankingApplied,
+        totalContextTokens: totalTokens,
       },
     };
   }
 
-  // Generate response for document chat
-  async generateDocumentResponse(
-    message: string,
-    context: AgentContext,
-    documentContext?: string
-  ): Promise<AgentResponse> {
-    const startTime = Date.now();
+  async generateDocumentResponse(message: string, context: AgentContext, documentContext?: string): Promise<AgentResponse> {
+    const start = Date.now();
     await this.initializeMemory();
+    if (!context.documentId) throw new Error("Document ID required");
 
-    if (!context.documentId) {
-      throw new Error("Document ID required for document chat");
-    }
-
-    // Get document from database
     const document = await prismadb.document.findUnique({
       where: { id: context.documentId },
       include: { messages: true },
     });
+    if (!document) throw new Error("Document not found");
 
-    if (!document) {
-      throw new Error("Document not found");
-    }
-
-    const documentKey = {
+    const documentKey: DocumentKey = {
       documentName: document.id,
       userId: context.userId,
       modelName: this.config.modelKey,
     };
 
-    const contexts: AgentResponse['contexts'] = {};
+    const contexts: AgentResponse["contexts"] = {};
+    let rerankingApplied = false;
+    const allReranked: RerankingResult[] = [];
 
-    // Get document-specific contexts
     if (this.config.useMemory && this.memoryManager) {
       try {
-        // Get recent chat history for this document
         contexts.conversation = await this.memoryManager.readLatestHistory(documentKey);
 
-        // Get similar conversations in this document
-        const similarChats = await this.memoryManager.vectorSearch(
+        const similar = await this.memoryManager.vectorSearch(
           contexts.conversation || "",
           document.id,
-          true
+          true,
+          this.config.useReranking,
+          this.config.modelKey,
+          this.config.rerankingThreshold
         );
-        contexts.similar = similarChats?.map(doc => doc.pageContent).join("\n") || "";
+        contexts.similar = similar.documents?.map((d) => d.pageContent).join("\n") || "";
+        if (similar.rerankingResults.length) {
+          allReranked.push(...similar.rerankingResults);
+          rerankingApplied = true;
+        }
 
-        // Get relevant document content
-        const relevantContent = await this.memoryManager.vectorSearch(
+        const relevant = await this.memoryManager.vectorSearch(
           message,
           document.id,
-          false
+          false,
+          this.config.useReranking,
+          this.config.modelKey,
+          this.config.rerankingThreshold
         );
-        contexts.knowledge = relevantContent?.map(doc => doc.pageContent).join("\n") || "";
-      } catch (error) {
-        console.warn("Memory operations failed:", error);
+        contexts.knowledge = relevant.documents?.map((d) => d.pageContent).join("\n") || "";
+        if (relevant.rerankingResults.length) {
+          allReranked.push(...relevant.rerankingResults);
+          rerankingApplied = true;
+        }
+      } catch (e) {
+        console.warn("doc memory ops failed", e);
       }
     }
 
-    // Build system prompt for document chat
-    let systemPrompt = `${SYSTEM_PROMPTS.documentChat}
+    const truncated = this.truncateContexts(contexts, this.config.maxContextLength);
 
-Document Title: ${document.title}
-Document Description: ${document.description}
-User: ${context.userName || "User"}`;
+    let systemPrompt =
+      `${SYSTEM_PROMPTS.documentChat}\n` +
+      `Title: ${document.title}\n` +
+      `Description: ${document.description}\n` +
+      `User: ${context.userName || "User"}\n` +
+      `Reranking: ${rerankingApplied ? "Yes" : "No"}`;
 
-    if (contexts.knowledge) systemPrompt += `\n\nRELEVANT DOCUMENT CONTENT:\n${contexts.knowledge}`;
-    if (contexts.similar) systemPrompt += `\n\nRELATED DISCUSSIONS:\n${contexts.similar}`;
-    if (contexts.conversation) systemPrompt += `\n\nCONVERSATION HISTORY:\n${contexts.conversation}`;
-    if (documentContext) systemPrompt += `\n\nADDITIONAL CONTEXT:\n${documentContext}`;
+    if (truncated.knowledge) systemPrompt += `\n\nRELEVANT${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.knowledge}`;
+    if (truncated.similar) systemPrompt += `\n\nRELATED${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.similar}`;
+    if (truncated.conversation) systemPrompt += `\n\nHISTORY:\n${truncated.conversation}`;
+    if (documentContext) systemPrompt += `\n\nADDITIONAL:\n${documentContext}`;
+    systemPrompt += `\n\nQuestion: ${message.trim()}`;
 
-    systemPrompt += `\n\nCurrent Question: ${message.trim()}`;
-
-    // Generate response
     const model = this.createModel();
-    const response = await model.invoke([
-      new SystemMessage(systemPrompt),
-      new HumanMessage(message)
-    ]);
+    const resp = await model.invoke([new SystemMessage(systemPrompt), new HumanMessage(message)]);
+    const content = String(resp.content || "");
 
-    const content = String(response.content || "");
-
-    // Save to memory and database
     if (this.config.useMemory && this.memoryManager) {
       try {
         await this.memoryManager.writeToHistory(`User: ${message}\n`, documentKey);
         await this.memoryManager.writeToHistory(`System: ${content}`, documentKey);
-      } catch (error) {
-        console.warn("Failed to save to memory:", error);
+      } catch (e) {
+        console.warn("save doc memory failed", e);
       }
     }
 
-    // Save messages to database
     try {
       await prismadb.document.update({
         where: { id: context.documentId },
@@ -743,232 +1278,217 @@ User: ${context.userName || "User"}`;
           messages: {
             createMany: {
               data: [
-                {
-                  content: message,
-                  role: "USER",
-                  userId: context.userId,
-                },
-                {
-                  content,
-                  role: "SYSTEM",
-                  userId: context.userId,
-                },
+                { content: message, role: "USER", userId: context.userId },
+                { content, role: "SYSTEM", userId: context.userId },
               ],
             },
           },
         },
       });
-    } catch (error) {
-      console.warn("Failed to save messages to database:", error);
+    } catch (e) {
+      console.warn("save messages to db failed", e);
     }
 
-    const contextSources = [
-      contexts.knowledge ? "document" : null,
-      contexts.conversation ? "history" : null,
-      contexts.similar ? "similar" : null,
+    const sources = [
+      truncated.knowledge ? "document" : null,
+      truncated.conversation ? "history" : null,
+      truncated.similar ? "similar" : null,
     ].filter(Boolean) as string[];
+
+    if (allReranked.length) truncated.rerankedResults = allReranked;
+
+    const totalTokens = systemPrompt.length + content.length;
 
     return {
       content,
       model: this.config.modelKey,
-      executionTime: Date.now() - startTime,
-      contexts,
+      executionTime: Date.now() - start,
+      contexts: truncated,
       metadata: {
         sessionId: context.sessionId || context.documentId,
         dbQueryDetected: false,
         dbQueryConfidence: 0,
-        contextSources,
+        contextSources: sources,
+        rerankingApplied,
+        totalContextTokens: totalTokens,
       },
     };
   }
 
-/**
- * Generates a streaming response by gathering contexts, creating a system prompt,
- * and streaming the LLM's output. It handles memory saving after the stream is complete.
- * This refactored version avoids creating a new agent instance, making it more efficient
- * and resolving potential runtime errors.
- *
- * @param {string} message - The user's input message.
- * @param {AgentContext} context - The user and session context.
- * @param {string} [additionalContext] - Any extra context to include in the prompt.
- * @returns {Promise<ReadableStream>} A readable stream of text chunks.
- */
-async generateStreamingResponse(
-  message: string,
-  context: AgentContext,
-  additionalContext?: string
-): Promise<ReadableStream> {
-  await this.initializeMemory();
+  async generateStreamingResponse(message: string, context: AgentContext, additionalContext?: string): Promise<ReadableStream> {
+    await this.initializeMemory();
 
-  const chatKey = {
-    userId: context.userId,
-    modelName: this.config.modelKey,
-    sessionId: context.sessionId || uuidv4(),
-  };
+    const chatKey: GeneralChatKey = {
+      userId: context.userId,
+      modelName: this.config.modelKey,
+      sessionId: context.sessionId || uuidv4(),
+    };
 
-  // Detect if this is a database query
-  const dbQueryDetection = isDatabaseQuery(message);
-  const shouldQueryDatabase = this.config.useDatabase && dbQueryDetection.isDbQuery;
+    const dbDetection = isDatabaseQuery(message);
+    const shouldQueryDB = this.config.useDatabase && dbDetection.isDbQuery;
 
-  const contexts: AgentResponse['contexts'] = {};
+    const contexts: AgentResponse["contexts"] = {};
+    let rerankingApplied = false;
+    const allReranked: RerankingResult[] = [];
 
-  // Gather contexts concurrently, similar to the chat method
-  const contextPromises: Promise<void>[] = [];
+    const tasks: Promise<void>[] = [];
 
-  // Database context
-  if (shouldQueryDatabase) {
-    contextPromises.push(
-      (async () => {
-        try {
-          const executor = new DatabaseQueryExecutor(this.config.modelKey, false);
-          contexts.database = await executor.executeQuery(message);
-        } catch (error) {
-          console.warn("Database query failed:", error);
-        }
-      })()
-    );
-  }
-
-  // Knowledge base context
-  if (this.config.useKnowledgeBase && this.memoryManager) {
-    contextPromises.push(
-      (async () => {
-        try {
-          const knowledgeResults = await this.memoryManager!.knowledgeBaseSearch(message, 5);
-          contexts.knowledge = knowledgeResults
-            ?.map(doc => doc.pageContent)
-            .join("\n---\n")
-            .slice(0, 4000);
-        } catch (error) {
-          console.warn("Knowledge base search failed:", error);
-        }
-      })()
-    );
-  }
-
-  // Conversation history and similar conversations
-  if (this.config.useMemory && this.memoryManager) {
-    contextPromises.push(
-      (async () => {
-        try {
-          // Add user's new message to the history for proper context
-          await this.memoryManager!.writeToGeneralChatHistory(`User: ${message}\n`, chatKey);
-
-          contexts.conversation = await this.memoryManager!.readLatestGeneralChatHistory(chatKey);
-
-          const similarResults = await this.memoryManager!.searchSimilarConversations(
-            message,
-            context.userId,
-            3
-          );
-          contexts.similar = similarResults
-            ?.filter(doc => doc.metadata?.chatSession !== context.sessionId)
-            .map(doc => doc.pageContent)
-            .join("\n---\n")
-            .slice(0, 1500);
-        } catch (error) {
-          console.warn("Memory operations failed:", error);
-        }
-      })()
-    );
-  }
-
-  // Await all context gathering promises
-  await Promise.all(contextPromises);
-
-  // Build the system prompt with all gathered contexts
-  let systemPrompt = `${SYSTEM_PROMPTS.chat}
-User Context: ${context.userName || "User"}
-Detection Confidence: ${(dbQueryDetection.confidence * 100).toFixed(1)}% database-related query`;
-
-  // Add database results if available
-  if (contexts.database?.success && contexts.database.data?.length) {
-    const sampleData = contexts.database.data.slice(0, 5);
-    systemPrompt += `\n\nLIVE DATABASE RESULTS:
-Query: ${message}
-SQL: ${contexts.database.sqlQuery}
-Results: ${contexts.database.data.length} records found
-Key Data: ${JSON.stringify(sampleData, null, 2)}
-${contexts.database.data.length > 5 ? `... plus ${contexts.database.data.length - 5} more records` : ""}
-
-Business Summary: ${contexts.database.summary}
-
-Instructions: Use this REAL data to answer the user's question with specific numbers and facts.`;
-  } else if (contexts.database?.error && shouldQueryDatabase) {
-    systemPrompt += `\n\nDATABASE QUERY ATTEMPTED:
-SQL: ${contexts.database.sqlQuery || "Unable to generate"}
-Error: ${contexts.database.error}
-Note: Current live data unavailable, provide general guidance if possible.`;
-  }
-
-  if (contexts.knowledge) systemPrompt += `\n\nKNOWLEDGE BASE:\n${contexts.knowledge}`;
-  if (contexts.conversation) systemPrompt += `\n\nCONVERSATION HISTORY:\n${contexts.conversation}`;
-  if (contexts.similar) systemPrompt += `\n\nRELATED DISCUSSIONS:\n${contexts.similar}`;
-  if (additionalContext) systemPrompt += `\n\nADDITIONAL CONTEXT:\n${additionalContext}`;
-  if (!contexts.database && shouldQueryDatabase) systemPrompt += `\n\nDATABASE SCHEMA (Reference):\n${DATABASE_SCHEMA}`;
-
-  systemPrompt += `\n\nCurrent Question: ${message.trim()}`;
-
-  // Create the model instance with streaming enabled
-  const model = this.createModel();
-
-  // Create the stream from the model invocation
-  const stream = await model.stream([
-    new SystemMessage(systemPrompt),
-    new HumanMessage(message)
-  ]);
-
-  // Return a new ReadableStream that handles chunking and final memory saving
-  return new ReadableStream({
-    async start(controller) {
-      const encoder = new TextEncoder();
-      let responseBuffer = "";
-
-      try {
-        for await (const chunk of stream) {
-          const content = (chunk as any).content || "";
-          if (content) {
-            controller.enqueue(encoder.encode(content));
-            responseBuffer += content;
-          }
-        }
-      } catch (error: any) {
-        const errorMsg = `I encountered an issue: ${error.message}. Please try rephrasing.`;
-        controller.enqueue(encoder.encode(errorMsg));
-        responseBuffer = errorMsg;
-      } finally {
-        controller.close();
-
-        // Save the full assistant response to memory only after the stream ends
-        if (responseBuffer.trim() && this.config.useMemory && this.memoryManager) {
+    if (shouldQueryDB) {
+      tasks.push(
+        (async () => {
           try {
-            // FIX: Changed 'const' to 'let' to allow reassignment
-            let savedResponse = `Assistant: ${responseBuffer.trim()}`;
-            if (contexts.database?.success && contexts.database.sqlQuery) {
-              savedResponse += `\n[Query: ${contexts.database.sqlQuery}]`;
+            const exec = new DatabaseQueryExecutor(this.config.modelKey, false);
+            contexts.database = await exec.executeQuery(message);
+          } catch (e) {
+            console.warn("DB query failed", e);
+          }
+        })()
+      );
+    }
+
+    if (this.config.useKnowledgeBase && this.memoryManager) {
+      tasks.push(
+        (async () => {
+          try {
+            const search = await this.memoryManager!.knowledgeBaseSearch(
+              message,
+              5,
+              {},
+              this.config.useReranking,
+              this.config.modelKey,
+              this.config.rerankingThreshold
+            );
+            contexts.knowledge = search.documents.map((d) => d.pageContent).join("\n---\n").slice(0, 4000);
+            if (search.rerankingResults.length) {
+              allReranked.push(...search.rerankingResults);
+              rerankingApplied = true;
             }
-            await this.memoryManager.writeToGeneralChatHistory(savedResponse, chatKey);
-          } catch (error) {
-            console.warn("Failed to save streaming response:", error);
+          } catch (e) {
+            console.warn("KB search failed", e);
+          }
+        })()
+      );
+    }
+
+    if (this.config.useMemory && this.memoryManager) {
+      tasks.push(
+        (async () => {
+          try {
+            await this.memoryManager!.writeToGeneralChatHistory(`User: ${message}\n`, chatKey);
+            contexts.conversation = await this.memoryManager!.readLatestGeneralChatHistory(chatKey);
+
+            const similar = await this.memoryManager!.searchSimilarConversations(
+              message,
+              context.userId,
+              3,
+              this.config.useReranking,
+              this.config.modelKey,
+              this.config.rerankingThreshold
+            );
+            contexts.similar = similar.documents
+              ?.filter((d: any) => d.metadata?.chatSession !== context.sessionId)
+              .map((d) => d.pageContent)
+              .join("\n---\n")
+              .slice(0, 1500);
+            if (similar.rerankingResults.length) {
+              allReranked.push(...similar.rerankingResults);
+              rerankingApplied = true;
+            }
+          } catch (e) {
+            console.warn("Memory ops failed", e);
+          }
+        })()
+      );
+    }
+
+    await Promise.all(tasks);
+
+    const truncated = this.truncateContexts(contexts, this.config.maxContextLength);
+
+    let systemPrompt =
+      `${SYSTEM_PROMPTS.chat}\n` +
+      `User: ${context.userName || "User"}\n` +
+      `Detection: ${(dbDetection.confidence * 100).toFixed(1)}% db-related\n` +
+      `Reranking: ${rerankingApplied ? "Yes" : "No"}`;
+
+    if (truncated.database?.success && truncated.database.data?.length) {
+      const sample = truncated.database.data.slice(0, 5);
+      const summarySafe = String(truncated.database.summary || "").slice(0, 1200);
+      systemPrompt += `
+
+LIVE DATABASE RESULTS:
+SQL: ${truncated.database.sqlQuery}
+Rows: ${truncated.database.data.length}
+Sample: ${JSON.stringify(sample, null, 2).slice(0, 1800)}
+Business Summary: ${summarySafe}
+
+Use these real numbers in the answer.`;
+    } else if (truncated.database?.error && shouldQueryDB) {
+      systemPrompt += `
+
+DATABASE QUERY ATTEMPTED:
+SQL: ${truncated.database.sqlQuery || "n/a"}
+Error: ${truncated.database.error}
+Give general guidance if possible.`;
+    }
+
+    if (truncated.knowledge) systemPrompt += `\n\nKNOWLEDGE${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.knowledge}`;
+    if (truncated.conversation) systemPrompt += `\n\nHISTORY:\n${truncated.conversation}`;
+    if (truncated.similar) systemPrompt += `\n\nRELATED${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.similar}`;
+    if (additionalContext) systemPrompt += `\n\nADDITIONAL:\n${additionalContext}`;
+    if (!truncated.database && shouldQueryDB) systemPrompt += `\n\nSCHEMA:\n${DATABASE_SCHEMA}`;
+    systemPrompt += `\n\nQuestion: ${message.trim()}`;
+
+    // force streaming on
+    const model = this.createModel({ forceStreaming: true });
+    const stream = await model.stream([new SystemMessage(systemPrompt), new HumanMessage(message)]);
+
+    const memoryManager = this.memoryManager;
+    const config = this.config;
+
+    return new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        let buffer = "";
+        try {
+          for await (const chunk of stream) {
+            const content = (chunk as any).content || "";
+            if (content) {
+              controller.enqueue(encoder.encode(content));
+              buffer += content;
+            }
+          }
+        } catch (err: any) {
+          const msg = `I hit an issue: ${err.message}. Please try again.`;
+          controller.enqueue(encoder.encode(msg));
+          buffer = msg;
+        } finally {
+          controller.close();
+          if (buffer.trim() && config.useMemory && memoryManager) {
+            try {
+              let toSave = `Assistant: ${buffer.trim()}`;
+              if (truncated.database?.success && truncated.database.sqlQuery) toSave += `\n[Query: ${truncated.database.sqlQuery}]`;
+              if (rerankingApplied) toSave += `\n[Reranking applied: ${allReranked.length}]`;
+              await memoryManager.writeToGeneralChatHistory(toSave, chatKey);
+            } catch (e) {
+              console.warn("save streaming response failed", e);
+            }
           }
         }
-      }
-    },
-  });
-}
-
-  // Execute database query only
-  async executeQuery(query: string): Promise<DatabaseQueryResult> {
-    const executor = new DatabaseQueryExecutor(this.config.modelKey, true);
-    return executor.executeQuery(query);
+      },
+    });
   }
 
-  // Get model information
+  async executeQuery(query: string): Promise<DatabaseQueryResult> {
+    const exec = new DatabaseQueryExecutor(this.config.modelKey, true);
+    return exec.executeQuery(query);
+  }
+
   getModelInfo() {
-    const modelConfig = AVAILABLE_MODELS[this.config.modelKey];
+    const conf = AVAILABLE_MODELS[this.config.modelKey];
     return {
       id: this.config.modelKey,
-      name: modelConfig.name,
+      name: conf.name,
       temperature: this.config.temperature,
       contextWindow: this.config.contextWindow,
       capabilities: {
@@ -976,17 +1496,36 @@ Note: Current live data unavailable, provide general guidance if possible.`;
         memory: this.config.useMemory,
         database: this.config.useDatabase,
         knowledgeBase: this.config.useKnowledgeBase,
+        reranking: this.config.useReranking,
+      },
+      reranking: {
+        enabled: this.config.useReranking,
+        threshold: this.config.rerankingThreshold,
+        maxContextLength: this.config.maxContextLength,
       },
     };
   }
+
+  async performReranking(query: string, contexts: any[], threshold?: number): Promise<RerankingResult[]> {
+    if (!this.memoryManager) await this.initializeMemory();
+    const docs = contexts.map((c) =>
+      new Document({
+        pageContent: typeof c === "string" ? c : c.pageContent || JSON.stringify(c),
+        metadata: typeof c === "object" ? c.metadata || {} : {},
+      })
+    );
+    return this.memoryManager!.rerankDocuments(query, docs, this.config.modelKey, threshold ?? this.config.rerankingThreshold);
+  }
 }
 
-// Convenience factory functions
+/* --------------------------- Factories and helpers --------------------------- */
+
 export const createChatAgent = (config?: Partial<AgentConfig>) =>
   new AIAgent({
     useMemory: true,
     useKnowledgeBase: true,
     useDatabase: true,
+    useReranking: true,
     ...config,
   });
 
@@ -995,6 +1534,7 @@ export const createDocumentAgent = (config?: Partial<AgentConfig>) =>
     useMemory: true,
     useDatabase: false,
     useKnowledgeBase: false,
+    useReranking: true,
     ...config,
   });
 
@@ -1003,24 +1543,43 @@ export const createDatabaseAgent = (config?: Partial<AgentConfig>) =>
     useMemory: false,
     useDatabase: true,
     useKnowledgeBase: false,
+    useReranking: false,
     temperature: 0.0,
     modelKey: "deepseek-r1:7b",
     ...config,
   });
 
-// Helper functions for route integration
-// This is the updated handleAuthAndRateLimit function.
-// It will now log the specific error that is being caught.
+export class ModernEmbeddingIntegration {
+  private memoryManager: MemoryManager;
+  constructor(embeddingConfig?: Partial<EmbeddingConfig>) {
+    this.memoryManager = new MemoryManager(embeddingConfig);
+  }
+  async processFile(fileUrl: string, documentId: string, options: any = {}) {
+    return this.memoryManager.processFile(fileUrl, documentId, options);
+  }
+  getEmbeddingInfo() {
+    return this.memoryManager.getEmbeddingInfo();
+  }
+  async healthCheck() {
+    return this.memoryManager.healthCheck();
+  }
+  async ensureModelsAvailable() {
+    return this.memoryManager.ensureEmbeddingModelsAvailable();
+  }
+}
+
+export async function loadFile(fileUrl: string, documentId: string, config?: Partial<EmbeddingConfig>): Promise<string[]> {
+  const integration = new ModernEmbeddingIntegration(config);
+  return integration.processFile(fileUrl, documentId);
+}
+
 export async function handleAuthAndRateLimit(request: Request): Promise<{
   user: any;
   success: boolean;
   error?: NextResponse;
 }> {
   try {
-    // Attempt to get the current authenticated user
     const user = await currentUser();
-
-    // If the user object or ID is missing, return a specific 401 error
     if (!user?.id) {
       return {
         user: null,
@@ -1029,11 +1588,9 @@ export async function handleAuthAndRateLimit(request: Request): Promise<{
       };
     }
 
-    // Attempt to check the rate limit
     const identifier = `${request.url}-${user.id}`;
-    const { success, limit, remaining } = await rateLimit(identifier);
+    const { success } = await rateLimit(identifier);
 
-    // If the rate limit check fails, return a 429 error
     if (!success) {
       return {
         user,
@@ -1041,117 +1598,221 @@ export async function handleAuthAndRateLimit(request: Request): Promise<{
         error: new NextResponse("Rate limit exceeded", { status: 429 }),
       };
     }
-
-    // All checks passed, return success
     return { user, success: true };
-
-  } catch (error: any) {
-    // This catch block is where your 500 error is coming from.
-    // The key is to log the full error object.
-    console.error("Authentication or Rate Limit Check Failed:");
-    console.error("Error message:", error.message);
-    console.error("Error stack trace:", error.stack);
-
-    // Return a 500 response with a slightly more informative message.
+  } catch (err: any) {
+    console.error("Auth/RateLimit failed:", err.message, err.stack);
     return {
       user: null,
       success: false,
-      error: new NextResponse(`Authentication error: ${error.message}`, { status: 500 }),
+      error: new NextResponse(`Authentication error: ${err.message}`, { status: 500 }),
     };
   }
 }
 
-export function createErrorResponse(error: any, status: number = 500): NextResponse {
-  const errorMessage = process.env.NODE_ENV === "development"
-    ? error.message || "Internal error"
-    : "An error occurred";
-
-  return NextResponse.json(
-    { error: errorMessage, timestamp: new Date().toISOString() },
-    { status }
-  );
+export function createErrorResponse(error: any, status = 500): NextResponse {
+  const errorMessage = process.env.NODE_ENV === "development" ? error.message || "Internal error" : "An error occurred";
+  return NextResponse.json({ error: errorMessage, timestamp: new Date().toISOString() }, { status });
 }
 
-// Response headers helper
-export function setAgentResponseHeaders(
-  response: any,
-  agentResponse: AgentResponse
-): void {
+export function setAgentResponseHeaders(response: any, agentResponse: AgentResponse): void {
+  // keep headers minimal in production to avoid leaks
+  const dev = process.env.NODE_ENV === "development";
   response.headers.set("X-Session-ID", agentResponse.metadata.sessionId);
   response.headers.set("X-Model-Used", agentResponse.model);
   response.headers.set("X-Processing-Time", `${agentResponse.executionTime}ms`);
   response.headers.set("X-DB-Query-Detected", String(agentResponse.metadata.dbQueryDetected));
   response.headers.set("X-DB-Confidence", `${(agentResponse.metadata.dbQueryConfidence * 100).toFixed(1)}%`);
   response.headers.set("X-Context-Sources", agentResponse.metadata.contextSources.join(","));
-
-  if (agentResponse.contexts.database?.success) {
+  response.headers.set("X-Reranking-Applied", String(agentResponse.metadata.rerankingApplied));
+  if (dev && agentResponse.metadata.totalContextTokens) {
+    response.headers.set("X-Total-Context-Tokens", String(agentResponse.metadata.totalContextTokens));
+  }
+  if (dev && agentResponse.contexts.database?.success) {
     response.headers.set("X-Database-Query-Used", "true");
     response.headers.set("X-Results-Count", String(agentResponse.contexts.database.data?.length || 0));
-    if (agentResponse.contexts.database.sqlQuery) {
-      response.headers.set("X-SQL-Query", encodeURIComponent(agentResponse.contexts.database.sqlQuery));
-    }
+  }
+  if (dev && agentResponse.contexts.rerankedResults?.length) {
+    const avg =
+      agentResponse.contexts.rerankedResults.reduce((s, r) => s + r.relevanceScore, 0) /
+      agentResponse.contexts.rerankedResults.length;
+    response.headers.set("X-Reranked-Results-Count", String(agentResponse.contexts.rerankedResults.length));
+    response.headers.set("X-Avg-Relevance-Score", avg.toFixed(3));
   }
 }
 
-// Validation schemas for different endpoints
+/* ------------------------------- Validators ------------------------------- */
+
 export const validateChatRequest = (body: any) => {
   const errors: string[] = [];
-
   let userMessage = "";
   if (Array.isArray(body.messages) && body.messages.length > 0) {
-    const lastMessage = body.messages.findLast((m: any) => m.role === "user");
-    if (lastMessage?.content) userMessage = lastMessage.content;
+    const lastUser = [...body.messages].reverse().find((m: any) => m.role === "user");
+    if (lastUser?.content) userMessage = lastUser.content;
   } else if (body.prompt) {
     userMessage = body.prompt;
   }
+  if (!userMessage?.trim()) errors.push("Message content is required");
+  if (userMessage.length > 10000) errors.push("Message too long (max 10,000 characters)");
 
-  if (!userMessage?.trim()) {
-    errors.push("Message content is required");
+  if (body.useReranking !== undefined && typeof body.useReranking !== "boolean") errors.push("useReranking must be a boolean");
+
+  if (body.rerankingThreshold !== undefined) {
+    const t = Number(body.rerankingThreshold);
+    if (Number.isNaN(t) || t < 0 || t > 1) errors.push("rerankingThreshold must be 0..1");
   }
 
-  if (userMessage.length > 10000) {
-    errors.push("Message too long (max 10,000 characters)");
+  if (body.maxContextLength !== undefined) {
+    const n = Number(body.maxContextLength);
+    if (Number.isNaN(n) || n < 1000 || n > 20000) errors.push("maxContextLength must be 1000..20000");
   }
 
-  return { userMessage: userMessage.trim(), errors };
+  return {
+    userMessage: userMessage.trim(),
+    useReranking: body.useReranking,
+    rerankingThreshold: body.rerankingThreshold,
+    maxContextLength: body.maxContextLength,
+    errors,
+  };
 };
 
 export const validateDocumentChatRequest = (body: any) => {
   const errors: string[] = [];
+  if (!body.prompt?.trim()) errors.push("Prompt is required");
+  if (body.prompt?.length > 5000) errors.push("Prompt too long (max 5,000 characters)");
 
-  if (!body.prompt?.trim()) {
-    errors.push("Prompt is required");
+  if (body.useReranking !== undefined && typeof body.useReranking !== "boolean") errors.push("useReranking must be a boolean");
+
+  if (body.rerankingThreshold !== undefined) {
+    const t = Number(body.rerankingThreshold);
+    if (Number.isNaN(t) || t < 0 || t > 1) errors.push("rerankingThreshold must be 0..1");
   }
 
-  if (body.prompt?.length > 5000) {
-    errors.push("Prompt too long (max 5,000 characters)");
-  }
-
-  return { prompt: body.prompt?.trim(), errors };
+  return {
+    prompt: body.prompt?.trim(),
+    useReranking: body.useReranking,
+    rerankingThreshold: body.rerankingThreshold,
+    errors,
+  };
 };
 
 export const validateDatabaseRequest = (body: any) => {
   const errors: string[] = [];
-
-  if (!body.question?.trim() && !body.directQuery?.trim()) {
-    errors.push("Either 'question' or 'directQuery' is required");
-  }
-
-  if (body.question?.length > 1000) {
-    errors.push("Question too long (max 1,000 characters)");
-  }
+  if (!body.question?.trim() && !body.directQuery?.trim()) errors.push("Either 'question' or 'directQuery' is required");
+  if (body.question?.length > 1000) errors.push("Question too long (max 1,000 characters)");
 
   return {
     question: body.question?.trim(),
     directQuery: body.directQuery?.trim(),
     model: body.model || "deepseek-r1:7b",
-    returnRawData: body.returnRawData || false,
-    errors
+    returnRawData: !!body.returnRawData,
+    errors,
   };
 };
 
-// Export additional utilities that might be useful
-export { DATABASE_SCHEMA, AVAILABLE_MODELS, isDatabaseQuery };
+/* --------------------- Reranking analytics (minor fix) --------------------- */
 
-// Default export
+class RerankingAnalytics {
+  private static instance: RerankingAnalytics;
+  private redis: Redis;
+  private constructor() {
+    this.redis = Redis.fromEnv();
+  }
+  public static getInstance() {
+    if (!RerankingAnalytics.instance) RerankingAnalytics.instance = new RerankingAnalytics();
+    return RerankingAnalytics.instance;
+  }
+
+  private improvementRatio(results: RerankingResult[]): number {
+    if (results.length < 2) return 0;
+    const originalOrder = [...results].sort((a, b) => a.originalRank - b.originalRank);
+    const rerankedOrder = [...results].sort((a, b) => a.newRank - b.newRank);
+    let improvements = 0;
+    for (let i = 0; i < Math.min(3, results.length); i++) {
+      if (rerankedOrder[i].originalRank > i) improvements += rerankedOrder[i].originalRank - i;
+    }
+    return improvements / Math.min(3, results.length);
+  }
+
+  async record(userId: string, query: string, results: RerankingResult[], executionTime: number) {
+    try {
+      const event = {
+        userId,
+        query: query.slice(0, 200),
+        timestamp: Date.now(),
+        resultsCount: results.length,
+        averageRelevanceScore: results.reduce((s, r) => s + r.relevanceScore, 0) / (results.length || 1),
+        executionTime,
+        topRelevanceScore: Math.max(...results.map((r) => r.relevanceScore)),
+        improvementRatio: this.improvementRatio(results),
+      };
+      const key = `reranking_events:${userId}:${Date.now()}`;
+      await this.redis.setex(key, 60 * 60 * 24 * 7, JSON.stringify(event));
+
+      const statsKey = `reranking_stats:${userId}`;
+      const existing = await this.redis.get(statsKey);
+      const stats = existing
+        ? JSON.parse(existing as string)
+        : { totalQueries: 0, totalExecutionTime: 0, averageRelevanceScore: 0, totalImprovements: 0, lastUpdated: Date.now() };
+
+      stats.totalQueries += 1;
+      stats.totalExecutionTime += event.executionTime;
+      stats.averageRelevanceScore = ((stats.averageRelevanceScore * (stats.totalQueries - 1)) + event.averageRelevanceScore) / stats.totalQueries;
+      stats.totalImprovements += event.improvementRatio;
+      stats.lastUpdated = Date.now();
+
+      await this.redis.setex(statsKey, 60 * 60 * 24 * 30, JSON.stringify(stats));
+    } catch (e) {
+      console.warn("Failed to record reranking analytics", e);
+    }
+  }
+
+  async getUserStats(userId: string) {
+    try {
+      const statsKey = `reranking_stats:${userId}`;
+      const s = await this.redis.get(statsKey);
+      return s ? JSON.parse(s as string) : null;
+    } catch (e) {
+      console.warn("Failed to get reranking stats", e);
+      return null;
+    }
+  }
+}
+
+/* ----------------------------- Initialization ----------------------------- */
+
+export async function initializeAgent(config: {
+  agentConfig?: Partial<AgentConfig>;
+  embeddingConfig?: Partial<EmbeddingConfig>;
+  ensureModels?: boolean;
+  healthCheck?: boolean;
+} = {}): Promise<{
+  agent: AIAgent;
+  embeddingIntegration: ModernEmbeddingIntegration;
+  healthStatus: { ollama: boolean; embedding: boolean; models: boolean };
+}> {
+  const { agentConfig = {}, embeddingConfig = {}, ensureModels = true, healthCheck = true } = config;
+
+  const agent = createChatAgent(agentConfig);
+  const embeddingIntegration = new ModernEmbeddingIntegration(embeddingConfig);
+
+  const healthStatus = { ollama: false, embedding: false, models: false };
+
+  if (healthCheck) {
+    healthStatus.ollama = await checkOllamaHealth(embeddingConfig.baseUrl || DEFAULT_EMBEDDING_CONFIG.baseUrl);
+    healthStatus.embedding = await embeddingIntegration.healthCheck();
+    if (ensureModels) healthStatus.models = await embeddingIntegration.ensureModelsAvailable();
+  }
+
+  console.log("Agent init:", {
+    agentModel: agentConfig.modelKey || DEFAULT_CONFIG.modelKey,
+    embeddingModel: embeddingConfig.model || DEFAULT_EMBEDDING_CONFIG.model,
+    healthStatus,
+  });
+
+  return { agent, embeddingIntegration, healthStatus };
+}
+
 export default AIAgent;
+
+// Re-exports (unchanged)
+export { DATABASE_SCHEMA, AVAILABLE_MODELS, isDatabaseQuery, DEFAULT_EMBEDDING_CONFIG, MemoryManager};

@@ -156,8 +156,8 @@ const DatabaseQueryInterface = () => {
           <button
             onClick={() => setMode("natural")}
             className={`px-4 py-2 rounded-md transition-colors ${mode === "natural"
-                ? "bg-white dark:bg-gray-900 shadow text-gray-900 dark:text-gray-100"
-                : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
+              ? "bg-white dark:bg-gray-900 shadow text-gray-900 dark:text-gray-100"
+              : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
               }`}
           >
             <Search className="w-4 h-4 inline mr-2" />
@@ -166,8 +166,8 @@ const DatabaseQueryInterface = () => {
           <button
             onClick={() => setMode("sql")}
             className={`px-4 py-2 rounded-md transition-colors ${mode === "sql"
-                ? "bg-white dark:bg-gray-900 shadow text-gray-900 dark:text-gray-100"
-                : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
+              ? "bg-white dark:bg-gray-900 shadow text-gray-900 dark:text-gray-100"
+              : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
               }`}
           >
             <Code className="w-4 h-4 inline mr-2" />
@@ -317,16 +317,95 @@ const DatabaseQueryInterface = () => {
             <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
               {result.success ? "Query Results" : "Query Error"}
             </h3>
-            {result.executionTime && (
+            {typeof result.executionTime === "number" && (
               <span className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-1">
                 <Clock className="w-3 h-3" />
                 {result.executionTime}ms
               </span>
             )}
           </div>
-          {/* ... keep your result blocks, just swap all color classes to gray/black/white variants ... */}
+
+          {/* Error state */}
+          {!result.success && result.error && (
+            <div className="text-sm text-red-600 dark:text-red-400">
+              {result.error}
+            </div>
+          )}
+
+          {/* SQL used */}
+          {result.sqlQuery && (
+            <div className="mb-4">
+              <div className="flex items-center justify-between mb-1">
+                <div className="font-medium text-gray-900 dark:text-gray-100">SQL</div>
+                <button
+                  onClick={() => copyToClipboard(result.sqlQuery!)}
+                  className="text-xs text-gray-600 dark:text-gray-300 hover:underline"
+                >
+                  Copy
+                </button>
+              </div>
+              <pre className="text-xs p-3 rounded-md bg-gray-50 dark:bg-gray-800 overflow-auto border border-gray-200 dark:border-gray-700">
+                {result.sqlQuery}
+              </pre>
+            </div>
+          )}
+
+          {/* Markdown answer/summary */}
+          {result.answer && (
+            <div className="prose prose-sm dark:prose-invert max-w-none mb-4">
+              <Streamdown markdown={result.answer} />
+            </div>
+          )}
+
+          {/* Data table */}
+          {Array.isArray(result.data) && result.data.length > 0 && (
+            <div className="overflow-auto border border-gray-200 dark:border-gray-700 rounded-md">
+              {(() => {
+                const cols = Object.keys(result.data[0]).slice(0, 50);
+                return (
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-gray-100 dark:bg-gray-800">
+                      <tr>
+                        {cols.map((c) => (
+                          <th key={c} className="text-left px-3 py-2 font-semibold text-gray-900 dark:text-gray-100">
+                            {c}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.data.slice(0, 100).map((row, i) => (
+                        <tr key={i} className="border-t border-gray-200 dark:border-gray-700">
+                          {cols.map((c) => (
+                            <td key={c} className="px-3 py-2 text-gray-800 dark:text-gray-200 whitespace-nowrap">
+                              {row[c] === null || row[c] === undefined ? "—" : String(row[c])}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* Note about truncated results */}
+          {"note" in result && result.note && (
+            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              {result.note}
+            </div>
+          )}
+
+          {/* Empty state */}
+          {result.success && (!result.data || result.data.length === 0) && (
+            <div className="text-sm text-gray-600 dark:text-gray-400">
+              No rows returned. Try adjusting your filters or date range.
+            </div>
+          )}
         </div>
       )}
+
 
       {/* Loading State */}
       {loading && (

@@ -139,33 +139,60 @@ export const useChat = (options: UseChatOptions = {}) => {
     }
   }, [onError]);
 
-  // Send message with streaming support
   const sendMessage = useCallback(async (
     message: string,
     sessionId?: string,
-    options: {
-      model?: string;
-      useKnowledgeBase?: boolean;
-      enableDatabaseQueries?: boolean;
-      temperature?: number;
-    } = {}
+    options: { model?: string; useKnowledgeBase?: boolean; enableDatabaseQueries?: boolean; temperature?: number } = {}
   ) => {
     if (!message.trim() || isLoading) return null;
 
-    // Cancel any existing request
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-
+    if (abortControllerRef.current) abortControllerRef.current.abort();
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
     setIsLoading(true);
 
+    // --- 1) Optimistic USER message
+    const userMsgId = `u-${Date.now()}`;
+    const nowIso = new Date().toISOString();
+    const optimisticUser: ChatMessage = { id: userMsgId, role: 'USER', content: message.trim(), createdAt: nowIso };
+
+    // Ensure we have a currentSession object; DO NOT invent a fake id.
+    // If there's no session in state yet, create a minimal one without a fake id;
+    // just enough so ChatInterface renders the bubbles immediately.
+    setCurrentSession(prev => {
+      if (prev) return { ...prev, chatMessages: [...prev.chatMessages, optimisticUser] };
+      return {
+        id: '', // empty for now; we'll fix after server responds
+        title: 'New Chat',
+        chatMessages: [optimisticUser],
+        modelKey: options.model || 'deepseek-r1:7b',
+        useDatabase: options.enableDatabaseQueries ?? true,
+        useKnowledgeBase: options.useKnowledgeBase ?? true,
+        temperature: options.temperature ?? 0.2,
+        isPinned: false,
+        isArchived: false,
+      };
+    });
+
+    // Also bump sidebar preview if we already have a concrete session id
+    if (currentSession?.id) {
+      setSessions(prev => prev.map(s =>
+        s.id === currentSession.id ? { ...s, lastMessageAt: nowIso, messageCount: s.messageCount + 1 } : s
+      ));
+    }
+
+    // --- 2) Temp ASSISTANT bubble to stream into
+    const asstTempId = `a-${Date.now()}`;
+    setCurrentSession(prev => prev ? {
+      ...prev,
+      chatMessages: [...prev.chatMessages, { id: asstTempId, role: 'ASSISTANT', content: '', createdAt: new Date().toISOString() }]
+    } : prev);
+
     try {
       const body = {
         messages: [{ role: 'user', content: message.trim() }],
-        sessionId,
+        sessionId, // may be undefined for first message—server should create one
         model: options.model || currentSession?.modelKey || 'deepseek-r1:7b',
         useKnowledgeBase: options.useKnowledgeBase ?? currentSession?.useKnowledgeBase ?? true,
         enableDatabaseQueries: options.enableDatabaseQueries ?? currentSession?.useDatabase ?? true,
@@ -178,25 +205,20 @@ export const useChat = (options: UseChatOptions = {}) => {
         body: JSON.stringify(body),
         signal: abortController.signal,
       });
+      if (!response.ok) throw new Error(`Failed to send message: ${response.statusText}`);
 
-      if (!response.ok) {
-        throw new Error(`Failed to send message: ${response.statusText}`);
-      }
-
-      const responseSessionId = response.headers.get('X-Session-ID');
+      // Get the authoritative session id (headers first, else fallback to the input/current)
+      const responseSessionId = response.headers.get('X-Session-ID') || sessionId || currentSession?.id || '';
       const isNewSession = response.headers.get('X-Is-New-Session') === 'true';
 
-      // Handle new session creation
       if (isNewSession && responseSessionId) {
         onSessionCreated?.(responseSessionId);
-        // Refresh sessions list with force flag
         await fetchSessions(false, true);
       }
 
-      // Stream the response
+      // --- 3) STREAM into the temp assistant bubble
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
-      let assistantMessage = '';
 
       if (reader) {
         try {
@@ -205,38 +227,47 @@ export const useChat = (options: UseChatOptions = {}) => {
             if (done) break;
 
             const chunk = decoder.decode(value, { stream: true });
-            assistantMessage += chunk;
+            if (!chunk) continue;
+
+            // Append streamed chunk into the temp assistant bubble
+            setCurrentSession(prev => {
+              if (!prev) return prev;
+              const msgs = prev.chatMessages.map(m =>
+                m.id === asstTempId ? { ...m, content: (m.content || '') + chunk } : m
+              );
+              return { ...prev, id: prev.id || responseSessionId, chatMessages: msgs };
+            });
           }
         } finally {
-          reader.releaseLock();
+          reader.releaseLock?.();
         }
       }
 
-      // Refresh the current session to get updated messages
+      // --- 4) Final reconcile with server truth
+      // Some servers append metadata, db flags, etc. Force-refresh from backend.
       if (responseSessionId) {
+        // ensure no skip
+        requestTrackingRef.current.lastSessionFetch = '';
         await fetchSession(responseSessionId, true);
       }
 
-      return {
-        sessionId: responseSessionId,
-        isNewSession,
-        response: assistantMessage,
-      };
-
+      return { sessionId: responseSessionId, isNewSession };
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.log('Request was cancelled');
-        return null;
-      }
-      console.error('Error sending message:', error);
+      // On error, remove temp assistant and (optionally) the optimistic user message
+      setCurrentSession(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          chatMessages: prev.chatMessages.filter(m => m.id !== asstTempId), // keep user bubble
+        };
+      });
       onError?.(error as Error);
       throw error;
     } finally {
       setIsLoading(false);
       abortControllerRef.current = null;
     }
-  }, [isLoading, currentSession, onError, onSessionCreated, fetchSessions, fetchSession]);
-
+  }, [isLoading, currentSession, onError, onSessionCreated, fetchSessions, fetchSession, setCurrentSession, setSessions]);
   // Update session
   const updateSession = useCallback(async (
     sessionId: string,
@@ -323,59 +354,59 @@ export const useChat = (options: UseChatOptions = {}) => {
     }
   }, []);
 
-// Fixed createNewSession function
-const createNewSession = useCallback(async (options?: {
-  title?: string;
-  model?: string;
-  useKnowledgeBase?: boolean;
-  enableDatabaseQueries?: boolean;
-  temperature?: number;
-}) => {
-  try {
-    const body = {
-      action: 'create',
-      title: options?.title || `New Chat ${new Date().toLocaleString()}`,
-      modelKey: options?.model || 'deepseek-r1:7b',
-      useKnowledgeBase: options?.useKnowledgeBase ?? true,
-      useDatabase: options?.enableDatabaseQueries ?? true,
-      temperature: options?.temperature ?? 0.2,
-    };
+  // Fixed createNewSession function
+  const createNewSession = useCallback(async (options?: {
+    title?: string;
+    model?: string;
+    useKnowledgeBase?: boolean;
+    enableDatabaseQueries?: boolean;
+    temperature?: number;
+  }) => {
+    try {
+      const body = {
+        action: 'create',
+        title: options?.title || `New Chat ${new Date().toLocaleString()}`,
+        modelKey: options?.model || 'deepseek-r1:7b',
+        useKnowledgeBase: options?.useKnowledgeBase ?? true,
+        useDatabase: options?.enableDatabaseQueries ?? true,
+        temperature: options?.temperature ?? 0.2,
+      };
 
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
 
-    if (!response.ok) {
-      throw new Error(`Failed to create session: ${response.statusText}`);
+      if (!response.ok) {
+        throw new Error(`Failed to create session: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const newSession = data.session;
+
+      // Update sessions list
+      setSessions(prev => [newSession, ...prev]);
+
+      // Set as current session
+      setCurrentSession({
+        ...newSession,
+        chatMessages: [], // New session starts with no messages
+      });
+
+      // Reset session tracking
+      requestTrackingRef.current.lastSessionFetch = newSession.id;
+
+      // Notify callback
+      onSessionCreated?.(newSession.id);
+
+      return newSession.id;
+    } catch (error) {
+      console.error('Error creating new session:', error);
+      onError?.(error as Error);
+      throw error;
     }
-
-    const data = await response.json();
-    const newSession = data.session;
-
-    // Update sessions list
-    setSessions(prev => [newSession, ...prev]);
-
-    // Set as current session
-    setCurrentSession({
-      ...newSession,
-      chatMessages: [], // New session starts with no messages
-    });
-
-    // Reset session tracking
-    requestTrackingRef.current.lastSessionFetch = newSession.id;
-
-    // Notify callback
-    onSessionCreated?.(newSession.id);
-
-    return newSession.id;
-  } catch (error) {
-    console.error('Error creating new session:', error);
-    onError?.(error as Error);
-    throw error;
-  }
-}, [onError, onSessionCreated]);
+  }, [onError, onSessionCreated]);
 
   // Memoize the return object to prevent unnecessary re-renders
   return useMemo(() => ({

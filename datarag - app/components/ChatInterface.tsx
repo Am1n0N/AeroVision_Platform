@@ -470,7 +470,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                   >
                     <div className="whitespace-pre-wrap break-words">{message.content}</div>
 
-                    {message.role === 'ASSISTANT' && (
+                    {message.role === 'ASSISTANT' && message.content?.trim() && (
                       <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-100 text-xs text-gray-500 flex-wrap">
                         {message.modelUsed && (
                           <span className="flex items-center gap-1">

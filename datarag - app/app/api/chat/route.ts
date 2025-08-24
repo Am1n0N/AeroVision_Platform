@@ -4,14 +4,13 @@ import { StreamingTextResponse } from "ai";
 import { NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
 import prismadb from "@/lib/prismadb";
-
+import { type ModelKey } from "@/config/models";
 // Import the centralized AI Agent and improved rate limiting
 import {
   createChatAgent,
   createErrorResponse,
   validateChatRequest,
   AVAILABLE_MODELS,
-  type ModelKey,
   type AgentConfig,
 } from "@/lib/agent";
 
@@ -207,6 +206,9 @@ async function handleChatMessage(body: any, user: any) {
   let responseContent = "";
   const originalStream = await agent.generateStreamingResponse(userMessage, context);
 
+  const preMessageCount = chatSession.messageCount;
+  const preTitle = chatSession.title;
+
   const responseStream = new ReadableStream({
     async start(controller) {
       const reader = originalStream.getReader();
@@ -240,6 +242,20 @@ async function handleChatMessage(body: any, user: any) {
             },
           });
 
+          const shouldAutoRename =
+            isNewSession ||
+            preMessageCount === 0 ||
+            /^New Chat\b/i.test(preTitle || "");
+
+          const updates: any = {
+            lastMessageAt: new Date(),
+            messageCount: { increment: 2 }, // user + assistant
+          };
+
+          if (shouldAutoRename && responseContent.trim().length > 0) {
+            updates.title = generateBetterSessionTitle(userMessage, responseContent);
+          }
+
           // Update session metadata
           await prismadb.chatSession.update({
             where: { id: chatSession.id },
@@ -251,6 +267,8 @@ async function handleChatMessage(body: any, user: any) {
               } : {}),
             },
           });
+
+
         } catch (error) {
           console.error("Failed to save response to database:", error);
         }

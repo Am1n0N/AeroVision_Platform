@@ -1,166 +1,179 @@
+// app/api/knowledge/route.ts
+export const runtime = "nodejs";
+
 import { NextResponse } from "next/server";
 import { currentUser } from "@clerk/nextjs";
-import { MemoryManager } from "@/lib/memory";
 import { rateLimit } from "@/lib/rate-limit";
+import { MemoryManager } from "@/lib/agent"; // <-- uses the named export you added
 
-interface AddKnowledgeRequest {
+type AddKnowledgeRequest = {
   content: string;
   title?: string;
   category?: string;
   source?: string;
   tags?: string[];
-}
+};
 
-interface SearchKnowledgeRequest {
+type SearchKnowledgeRequest = {
   query: string;
   limit?: number;
   category?: string;
+  tags?: string[];         // optional: filter by tags too
+  useReranking?: boolean;  // expose reranking control
+  threshold?: number;      // reranking threshold 0..1
+};
+
+function badRequest(msg: string) {
+  return NextResponse.json({ error: msg }, { status: 400 });
 }
 
-// POST - Add content to knowledge base
+function unauthorized() {
+  return new NextResponse("Unauthorized", { status: 401 });
+}
+
+/* ---------------------------------- POST ---------------------------------- */
+/** Add content to the knowledge base */
 export async function POST(request: Request) {
   try {
-    const { content, title, category, source, tags }: AddKnowledgeRequest = await request.json();
+    const body = (await request.json()) as AddKnowledgeRequest;
 
-    // Authentication check
     const user = await currentUser();
-    if (!user?.id) {
-      return new NextResponse("Unauthorized", { status: 401 });
-    }
+    if (!user?.id) return unauthorized();
 
-    // Check if user has admin privileges (you might want to implement role-based access)
-    // For now, we'll allow all authenticated users to add knowledge
-    // if (user.privateMetadata?.role !== 'admin') {
-    //   return new NextResponse("Insufficient permissions", { status: 403 });
-    // }
+    // Basic input checks
+    const content = (body.content || "").trim();
+    if (!content) return badRequest("Content is required");
+    if (content.length > 50_000) return badRequest("Content is too long (max 50,000 characters)");
 
-    // Input validation
-    if (!content || typeof content !== 'string' || content.trim().length === 0) {
-      return new NextResponse("Content is required", { status: 400 });
-    }
+    // Simple metadata shaping
+    const metadata = {
+      title: (body.title || "Untitled").slice(0, 200),
+      category: (body.category || "general").slice(0, 100),
+      source: (body.source || "user_input").slice(0, 100),
+      tags: Array.isArray(body.tags) ? body.tags.slice(0, 20) : [],
+      addedBy: user.id,
+      addedByName: `${user.firstName || ""} ${user.lastName || ""}`.trim(),
+    };
 
-    if (content.length > 50000) {
-      return new NextResponse("Content is too long (max 50000 characters)", { status: 400 });
-    }
-
-    // Rate limiting
-    const identifier = request.url + "-" + user.id;
-    const { success } = await rateLimit(identifier, 10, 3600); // 10 requests per hour
+    // Rate limit (10 requests / hour per user+url)
+    const identifier = `${request.url}-${user.id}`;
+    const { success } = await rateLimit(`${user.id}:${request.url}`, 'default');
     if (!success) {
       return new NextResponse("Rate limit exceeded for knowledge base additions", { status: 429 });
     }
 
-    const memoryManager = await MemoryManager.getInstance();
+    const mm = await MemoryManager.getInstance();
+    const ok = await mm.addToKnowledgeBase(content, metadata);
 
-    const metadata = {
-      title: title || "Untitled",
-      category: category || "general",
-      source: source || "user_input",
-      tags: tags || [],
-      addedBy: user.id,
-      addedByName: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
-    };
-
-    const success_result = await memoryManager.addToKnowledgeBase(content.trim(), metadata);
-
-    if (success_result) {
-      return NextResponse.json({
-        message: "Content added to knowledge base successfully",
-        metadata: {
-          title: metadata.title,
-          category: metadata.category,
-          contentLength: content.trim().length
-        }
-      });
-    } else {
-      return new NextResponse("Failed to add content to knowledge base", { status: 500 });
+    if (!ok) {
+      return NextResponse.json({ error: "Failed to add content to knowledge base" }, { status: 500 });
     }
 
-  } catch (error) {
-    console.error("[Knowledge.POST]", error);
-    return new NextResponse("Internal Error", { status: 500 });
+    return NextResponse.json({
+      message: "Content added successfully",
+      metadata: {
+        title: metadata.title,
+        category: metadata.category,
+        source: metadata.source,
+        tags: metadata.tags,
+        contentLength: content.length,
+      },
+    });
+  } catch (err: any) {
+    console.error("[Knowledge.POST]", err);
+    return NextResponse.json({ error: err?.message || "Internal Error" }, { status: 500 });
   }
 }
 
-// GET - Search knowledge base
+/* ----------------------------------- GET ---------------------------------- */
+/** Search the knowledge base */
 export async function GET(request: Request) {
   try {
-    const { searchParams } = new URL(request.url);
-    const query = searchParams.get('query');
-    const limit = parseInt(searchParams.get('limit') || '5');
-    const category = searchParams.get('category');
-
-    // Authentication check
     const user = await currentUser();
-    if (!user?.id) {
-      return new NextResponse("Unauthorized", { status: 401 });
-    }
+    if (!user?.id) return unauthorized();
+
+    const { searchParams } = new URL(request.url);
+    const query = (searchParams.get("query") || "").trim();
 
     if (!query) {
       return NextResponse.json({
         message: "Knowledge base search endpoint",
-        usage: "GET /api/knowledge?query=your_search_term&limit=5&category=optional"
+        usage:
+          "GET /api/knowledge?query=your_search_term&limit=5&category=optional&tags=tag1,tag2&useReranking=true&threshold=0.6",
       });
     }
+    if (query.length > 1000) return badRequest("Query is too long (max 1000 characters)");
 
-    // Input validation
-    if (query.length > 1000) {
-      return new NextResponse("Query is too long (max 1000 characters)", { status: 400 });
-    }
+    const limit = Math.max(1, Math.min(parseInt(searchParams.get("limit") || "5", 10) || 5, 20));
+    const category = searchParams.get("category") || undefined;
 
-    const memoryManager = await MemoryManager.getInstance();
+    // optional: comma-separated tags filter
+    const tagsParam = searchParams.get("tags");
+    const tags = tagsParam
+      ? tagsParam
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean)
+      : undefined;
 
-    const filters = category ? { category } : undefined;
-    const results = await memoryManager.knowledgeBaseSearch(query, Math.min(limit, 20), filters);
+    const useReranking = (searchParams.get("useReranking") || "true").toLowerCase() === "true";
+    const thresholdRaw = searchParams.get("threshold");
+    const threshold =
+      thresholdRaw !== null && !Number.isNaN(Number(thresholdRaw))
+        ? Math.max(0, Math.min(1, Number(thresholdRaw)))
+        : undefined;
 
-    const formattedResults = results?.map(doc => ({
+    const mm = await MemoryManager.getInstance();
+
+    // Build simple filters compatible with your pinecone metadata
+    const filters: Record<string, any> = {};
+    if (category) filters.category = category;
+    if (tags?.length) filters.tags = tags;
+
+    // Request topK plus headroom when reranking (your manager does this internally too)
+    const { documents, rerankingResults } = await mm.knowledgeBaseSearch(
+      query,
+      limit,
+      filters,
+      useReranking,
+      // use your chat model key if you want to control the reranker; otherwise default
+      undefined,
+      threshold
+    );
+
+    const results = (documents || []).map((doc) => ({
       content: doc.pageContent,
       metadata: doc.metadata,
-      relevanceScore: doc.metadata?.score || null
-    })) || [];
+      // your manager stamps `metadata.searchScore` during similaritySearchWithScore
+      relevanceScore: doc.metadata?.searchScore ?? null,
+    }));
 
     return NextResponse.json({
       query,
-      resultsCount: formattedResults.length,
-      results: formattedResults
+      limit,
+      category: category || null,
+      tags: tags || [],
+      reranking: useReranking,
+      threshold: threshold ?? null,
+      resultsCount: results.length,
+      results,
     });
-
-  } catch (error) {
-    console.error("[Knowledge.GET]", error);
-    return new NextResponse("Internal Error", { status: 500 });
+  } catch (err: any) {
+    console.error("[Knowledge.GET]", err);
+    return NextResponse.json({ error: err?.message || "Internal Error" }, { status: 500 });
   }
 }
 
-// PUT - Update knowledge base entry (if you implement this feature)
-export async function PUT(request: Request) {
-  try {
-    const user = await currentUser();
-    if (!user?.id) {
-      return new NextResponse("Unauthorized", { status: 401 });
-    }
-
-    // This would require implementing knowledge base entry IDs and update functionality
-    return new NextResponse("Update functionality not implemented yet", { status: 501 });
-
-  } catch (error) {
-    console.error("[Knowledge.PUT]", error);
-    return new NextResponse("Internal Error", { status: 500 });
-  }
+/* ----------------------------------- PUT ---------------------------------- */
+export async function PUT() {
+  const user = await currentUser();
+  if (!user?.id) return unauthorized();
+  return new NextResponse("Update functionality not implemented yet", { status: 501 });
 }
 
-// DELETE - Remove knowledge base entry (if you implement this feature)
-export async function DELETE(request: Request) {
-  try {
-    const user = await currentUser();
-    if (!user?.id) {
-      return new NextResponse("Unauthorized", { status: 401 });
-    }
-
-    // This would require implementing knowledge base entry IDs and deletion functionality
-    return new NextResponse("Delete functionality not implemented yet", { status: 501 });
-
-  } catch (error) {
-    console.error("[Knowledge.DELETE]", error);
-    return new NextResponse("Internal Error", { status: 500 });
-  }
+/* --------------------------------- DELETE --------------------------------- */
+export async function DELETE() {
+  const user = await currentUser();
+  if (!user?.id) return unauthorized();
+  return new NextResponse("Delete functionality not implemented yet", { status: 501 });
 }

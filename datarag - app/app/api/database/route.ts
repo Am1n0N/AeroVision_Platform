@@ -32,20 +32,38 @@ function tryParse<T = any>(s: any): { ok: true; data: T } | { ok: false; error: 
 }
 
 // POST handler for database queries
+// POST handler for database queries
 export async function POST(request: Request) {
   try {
+    console.log("[POST] Incoming request...");
+
     // Authentication and rate limiting
     const authResult = await handleAuthAndRateLimit(request);
+    console.log("[Auth Result]", authResult);
+
     if (!authResult.success) {
+      console.warn("[Auth Failed]", authResult.error);
       return authResult.error;
     }
     const { user } = authResult;
+    console.log("[User]", user);
 
     // Parse and validate request
     const body = await request.json();
-    const { question, directQuery, model, returnRawData, errors } = validateDatabaseRequest(body);
+    console.log("[Request Body]", body);
+
+    const { question, directQuery, model, returnRawData, errors } =
+      validateDatabaseRequest(body);
+    console.log("[Validated Request]", {
+      question,
+      directQuery,
+      model,
+      returnRawData,
+      errors,
+    });
 
     if (errors.length > 0) {
+      console.warn("[Validation Errors]", errors);
       return NextResponse.json(
         { error: "Invalid request format", details: errors },
         { status: 400 }
@@ -55,23 +73,26 @@ export async function POST(request: Request) {
     // Configure database agent
     const agentConfig: Partial<AgentConfig> = {
       modelKey: model as any,
-      temperature: 0.0, // Low temperature for precise SQL generation
-      useMemory: false, // Database queries don't need conversation memory
+      temperature: 0.0,
+      useMemory: false,
       useDatabase: true,
       useKnowledgeBase: false,
-      streaming: false, // Database queries return structured results
+      streaming: false,
       timeout: 45000,
     };
 
     const agent = createDatabaseAgent(agentConfig);
+    console.log("[Agent Config]", agentConfig);
 
     let result;
     let sqlQuery = "";
     let answer = "";
 
     if (directQuery) {
-      // For direct queries, we validate and execute directly
+      console.log("[Direct Query Execution]", directQuery);
+
       if (!directQuery.trim().toUpperCase().startsWith("SELECT")) {
+        console.warn("[Rejected Direct Query - not SELECT]");
         return NextResponse.json(
           { error: "Only SELECT queries are allowed for direct execution" },
           { status: 400 }
@@ -80,20 +101,25 @@ export async function POST(request: Request) {
 
       try {
         result = await agent.executeQuery(directQuery);
+        console.log("[Direct Query Result]", result);
         sqlQuery = directQuery;
       } catch (error: any) {
+        console.error("[Direct Query Error]", error);
         return NextResponse.json(
           { error: "Direct query execution failed", details: error.message },
           { status: 400 }
         );
       }
     } else {
-      // For natural language questions, use the agent's query generation
+      console.log("[Natural Language Question Execution]", question);
+
       try {
         result = await agent.executeQuery(question);
+        console.log("[Agent Query Result]", result);
         sqlQuery = result.sqlQuery || "";
         answer = result.summary || "";
       } catch (error: any) {
+        console.error("[Agent Query Error]", error);
         return NextResponse.json(
           { error: "Query generation and execution failed", details: error.message },
           { status: 400 }
@@ -102,6 +128,8 @@ export async function POST(request: Request) {
     }
 
     // Build response
+    console.log("[Result Before Response]", result);
+
     const response: any = {
       success: !!result?.success,
       question: question || "Direct SQL Query",
@@ -115,7 +143,6 @@ export async function POST(request: Request) {
       if (returnRawData) {
         response.data = result.data;
       } else {
-        // Return limited data for UI display
         response.data = (result.data || []).slice(0, 20);
         if (answer) response.answer = answer;
         if (result.data && result.data.length > 20) {
@@ -123,27 +150,29 @@ export async function POST(request: Request) {
         }
       }
 
-      // Add exploration steps if available
       if (result.explorationSteps) {
         response.explorationSteps = result.explorationSteps;
       }
     } else {
+      console.warn("[Query Failed]", result?.error);
       response.error = result?.error || "Query failed";
-      response.hint = "Try rephrasing with more specifics (e.g., date range, airline, airport IATA codes).";
+      response.hint =
+        "Try rephrasing with more specifics (e.g., date range, airline, airport IATA codes).";
     }
 
-    // Add performance metrics if available
     if (result?.performance) {
       response.performance = result.performance;
     }
 
-    return NextResponse.json(response);
+    console.log("[Final Response]", response);
 
+    return NextResponse.json(response);
   } catch (error: any) {
     console.error("[DATABASE_QUERY_ERROR]", error);
     return createErrorResponse(error);
   }
 }
+
 
 // GET handler for database schema and exploration
 export async function GET(request: Request) {
@@ -390,7 +419,7 @@ export async function PUT(request: Request) {
 
     const body = await request.json();
     const {
-      default_model = "deepseek-r1:7b",
+      default_model = "MFDoom/deepseek-r1-tool-calling:7b",
       temperature = 0.0,
       max_results = 100,
       enable_optimization = true,

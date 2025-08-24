@@ -18,7 +18,7 @@ import PDFViewer from "@/components/pdfviewer";
 import { useState } from "react";
 import { useEdgeStore } from "@/lib/edgestore";
 import Link from "next/link";
-import { loadFile } from "@/lib/pinecone";
+
 
 
 interface DocumentIdPageProps {
@@ -92,40 +92,66 @@ export const DocumentForm = ({
 
     const [url, setUrl] = useState<string>(initialData?.fileurl || "");
 
+
+    const MAX_CONTENT_CHARS = 48000; // a little under 50k cap on server
+    const CHUNK_SIZE = 8000;
+
+    function chunkText(s: string, size = CHUNK_SIZE) {
+        const chunks: string[] = [];
+        for (let i = 0; i < s.length; i += size) chunks.push(s.slice(i, i + size));
+        return chunks;
+    }
+
     const addToKnowledgeBase = async (documentData: any, fileUrl: string, extractedText: string) => {
         try {
-            setKbProgress(25);
+            setKbProgress(10);
+
+            if (!extractedText?.trim()) {
+                toast({ variant: "destructive", description: "No text extracted from PDF." });
+                return;
+            }
 
             const selectedCategory = categories.find(cat => cat.id === documentData.categoryId);
-
-            const knowledgeData = {
-                content: extractedText,
+            const baseMeta = {
                 title: documentData.title,
                 category: selectedCategory?.name || 'general',
                 source: 'document_upload',
-                tags: [
-                    'document',
-                    selectedCategory?.name || 'general',
-                    'pdf'
-                ]
+                tags: ['document', selectedCategory?.name || 'general', 'pdf'],
             };
 
-            setKbProgress(50);
+            // If it fits, one POST; else chunk and send multiple
+            if (extractedText.length <= MAX_CONTENT_CHARS) {
+                setKbProgress(40);
+                await axios.post('/api/knowledge', { ...baseMeta, content: extractedText });
+                setKbProgress(100);
+                toast({ description: "Document added to knowledge base successfully!" });
+                return;
+            }
 
-            const response = await axios.post('/api/knowledge', knowledgeData);
+            const parts = chunkText(extractedText);
+            const total = parts.length;
+            for (let i = 0; i < total; i++) {
+                const partMeta = {
+                    ...baseMeta,
+                    title: `${baseMeta.title} (part ${i + 1}/${total})`,
+                    // optional tag to find all parts
+                    tags: [...baseMeta.tags, 'chunk'],
+                    content: parts[i],
+                };
+                const pct = Math.round(((i + 1) / total) * 100);
+                setKbProgress(Math.max(40, pct));
+                await axios.post('/api/knowledge', partMeta);
+            }
 
             setKbProgress(100);
+            toast({ description: "Document chunked and added to knowledge base!" });
 
-            if (response.status === 200) {
-                toast({
-                    description: "Document added to knowledge base successfully!",
-                });
-            }
-        } catch (error) {
-            console.error('Error adding to knowledge base:', error);
+        } catch (error: any) {
+            const msg = error?.response?.data?.error || error?.message || "Failed to add to knowledge base";
+            console.error('Error adding to knowledge base:', msg);
             toast({
                 variant: "destructive",
-                description: "Document saved but failed to add to knowledge base. You can try again later.",
+                description: `Document saved but KB add failed: ${String(msg)}`,
             });
         } finally {
             setKbProgress(0);
@@ -308,19 +334,19 @@ export const DocumentForm = ({
                                         <FormItem className="col-span-2 md:col-span-1">
                                             <FormLabel>File</FormLabel>
                                             {!file ?
-                                            <FileUpload onFileUpload={
-                                                (file: any) => {
-                                                    setFile(file);
-                                                    form.setValue("fileurl", file);
-                                                }
-                                            } alreadyUploaded={true}/>
-                                           :
-                                           <FileUpload onFileUpload={
-                                                (file: any) => {
-                                                    setFile(file);
-                                                    form.setValue("fileurl", file);
-                                                }
-                                            } alreadyUploaded={false} />}
+                                                <FileUpload onFileUpload={
+                                                    (file: any) => {
+                                                        setFile(file);
+                                                        form.setValue("fileurl", file);
+                                                    }
+                                                } alreadyUploaded={true} />
+                                                :
+                                                <FileUpload onFileUpload={
+                                                    (file: any) => {
+                                                        setFile(file);
+                                                        form.setValue("fileurl", file);
+                                                    }
+                                                } alreadyUploaded={false} />}
 
                                             <FormDescription>
                                                 Choose the file you want to upload

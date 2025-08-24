@@ -1,4 +1,4 @@
-import { loadFile } from "@/lib/pinecone";
+import { ModernEmbeddingIntegration } from "@/lib/agent";
 import prismadb from "@/lib/prismadb";
 import { currentUser } from "@clerk/nextjs"
 import { NextResponse } from "next/server"
@@ -33,8 +33,8 @@ export async function POST(req: Request){
                 createdBy: user.id
             }
         });
-
-        const embedFile = await loadFile(fileurl, document.id)
+        const integration = new ModernEmbeddingIntegration();
+        const embedFile = await integration.processFile(fileurl, document.id)
         console.log("Embed file", embedFile)
 
         return NextResponse.json(document);
