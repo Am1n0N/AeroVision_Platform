@@ -17,7 +17,6 @@ const PdfThumbnail = ({ pdfUrl }: { pdfUrl: string }) => {
   const handleResize = () => {
     const containerWidth = (document.querySelector('.relative.h-full.w-full') as HTMLElement)?.offsetWidth || 0;
     const containerHeight = (document.querySelector('.relative.h-full.w-full') as HTMLElement)?.offsetHeight || 0;
-    console.log(containerWidth);
     setThumbnailWidth(containerWidth);
   };
 

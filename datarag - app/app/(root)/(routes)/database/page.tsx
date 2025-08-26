@@ -1,9 +1,19 @@
 "use client";
-import React, { useState, useEffect } from 'react';
-import { Database, Search, Code, Table, AlertCircle, Clock, CheckCircle, Loader, Copy } from 'lucide-react';
-import { Streamdown } from 'streamdown';
-import { BeatLoader } from 'react-spinners';
-import { toast, Toaster } from 'react-hot-toast';
+import React, { useState, useEffect } from "react";
+import {
+  Database,
+  Search,
+  Code,
+  Table,
+  AlertCircle,
+  Clock,
+  CheckCircle,
+  Loader,
+} from "lucide-react";
+import { Streamdown } from "streamdown";
+import { BeatLoader } from "react-spinners";
+import { toast, Toaster } from "react-hot-toast";
+
 interface QueryResult {
   success: boolean;
   question?: string;
@@ -13,6 +23,7 @@ interface QueryResult {
   data?: any[];
   answer?: string;
   error?: string;
+  note?: string;
 }
 
 interface TableInfo {
@@ -27,45 +38,41 @@ interface TableInfo {
 }
 
 const DatabaseQueryInterface = () => {
-  const [query, setQuery] = useState('');
-  const [directSQL, setDirectSQL] = useState('');
+  const [query, setQuery] = useState("");
+  const [directSQL, setDirectSQL] = useState("");
   const [result, setResult] = useState<QueryResult | null>(null);
   const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState<'natural' | 'sql'>('natural');
+  const [mode, setMode] = useState<"natural" | "sql">("natural");
   const [tableInfo, setTableInfo] = useState<TableInfo>({});
   const [showSchema, setShowSchema] = useState(false);
 
-
-
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
-    toast.success('Copied to clipboard!');
+    toast.success("Copied to clipboard!");
   };
 
-  // Example queries
   const exampleQueries = [
     "Show me all flights from JFK to LAX today",
     "What are the top 10 airlines by number of flights?",
     "Which airports have the highest average delays?",
     "Show me flight statistics for American Airlines",
     "What are the most popular routes?",
-    "Show me aircraft utilization statistics"
+    "Show me aircraft utilization statistics",
   ];
 
-  // Load table information on mount
   useEffect(() => {
     fetchTableInfo();
   }, []);
 
   const fetchTableInfo = async () => {
     try {
-      const response = await fetch('/api/database?action=tables');
+      const response = await fetch("/api/database?action=tables");
       const data = await response.json();
       if (data.tables) {
         setTableInfo(data.tables);
       }
     } catch (error) {
-      console.error('Failed to load table info:', error);
+      console.error("Failed to load table info:", error);
     }
   };
 
@@ -76,16 +83,16 @@ const DatabaseQueryInterface = () => {
     setResult(null);
 
     try {
-      const response = await fetch('/api/database', {
-        method: 'POST',
+      const response = await fetch("/api/database", {
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          question: mode === 'natural' ? query : undefined,
-          directQuery: mode === 'sql' ? directSQL : undefined,
+          question: mode === "natural" ? query : undefined,
+          directQuery: mode === "sql" ? directSQL : undefined,
           model: "qwen2.5-coder:7b-instruct",
-          returnRawData: mode === 'sql',
+          returnRawData: mode === "sql",
         }),
       });
 
@@ -94,7 +101,7 @@ const DatabaseQueryInterface = () => {
     } catch (error) {
       setResult({
         success: false,
-        error: 'Failed to execute query. Please try again.'
+        error: "Failed to execute query. Please try again.",
       });
     } finally {
       setLoading(false);
@@ -105,7 +112,7 @@ const DatabaseQueryInterface = () => {
     try {
       const res = await fetch(
         `/api/database?action=sample&table=${encodeURIComponent(tableName)}`,
-        { credentials: "same-origin" } // keep cookies if Clerk protects the route
+        { credentials: "same-origin" }
       );
 
       if (!res.ok) {
@@ -114,9 +121,11 @@ const DatabaseQueryInterface = () => {
       }
 
       const json = await res.json();
-      const rows = Array.isArray(json.rows) ? json.rows
-        : Array.isArray(json.data) ? json.data
-          : [];
+      const rows = Array.isArray(json.rows)
+        ? json.rows
+        : Array.isArray(json.data)
+        ? json.data
+        : [];
 
       if (json.success && rows.length >= 0) {
         setResult({
@@ -134,9 +143,9 @@ const DatabaseQueryInterface = () => {
     }
   };
 
-
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-6">
+    <div className="mx-auto h-screen px-28 py-8 space-y-6 bg-gray-50 dark:bg-black">
+      <Toaster />
       {/* Header */}
       <div className="text-center mb-8">
         <div className="flex items-center justify-center gap-3 mb-4">
@@ -152,23 +161,25 @@ const DatabaseQueryInterface = () => {
 
       {/* Mode Toggle */}
       <div className="flex justify-center mb-6">
-        <div className="bg-gray-100 dark:bg-gray-800 p-1 rounded-lg">
+        <div className="bg-gray-100 dark:bg-neutral-800 p-1 rounded-lg">
           <button
             onClick={() => setMode("natural")}
-            className={`px-4 py-2 rounded-md transition-colors ${mode === "natural"
-              ? "bg-white dark:bg-gray-900 shadow text-gray-900 dark:text-gray-100"
-              : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
-              }`}
+            className={`px-4 py-2 rounded-md transition-colors ${
+              mode === "natural"
+                ? "bg-white dark:bg-neutral-950 shadow text-gray-900 dark:text-gray-100"
+                : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
+            }`}
           >
             <Search className="w-4 h-4 inline mr-2" />
             Natural Language
           </button>
           <button
             onClick={() => setMode("sql")}
-            className={`px-4 py-2 rounded-md transition-colors ${mode === "sql"
-              ? "bg-white dark:bg-gray-900 shadow text-gray-900 dark:text-gray-100"
-              : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
-              }`}
+            className={`px-4 py-2 rounded-md transition-colors ${
+              mode === "sql"
+                ? "bg-white dark:bg-neutral-950 shadow text-gray-900 dark:text-gray-100"
+                : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
+            }`}
           >
             <Code className="w-4 h-4 inline mr-2" />
             Direct SQL
@@ -177,7 +188,7 @@ const DatabaseQueryInterface = () => {
       </div>
 
       {/* Query Input */}
-      <div className="bg-white dark:bg-gray-900 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+      <div className="bg-white dark:bg-neutral-950 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
         {mode === "natural" ? (
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
@@ -187,7 +198,7 @@ const DatabaseQueryInterface = () => {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="e.g., Show me all flights from New York to Los Angeles with delays over 30 minutes"
-              className="w-full p-3 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-gray-500 focus:border-gray-500 resize-none"
+              className="w-full p-3 border border-gray-200 dark:border-neutral-700 rounded-md bg-gray-50 dark:bg-neutral-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-gray-500 focus:border-gray-500 resize-none"
               rows={3}
             />
 
@@ -201,7 +212,7 @@ const DatabaseQueryInterface = () => {
                   <button
                     key={index}
                     onClick={() => setQuery(example)}
-                    className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-3 py-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                    className="text-xs bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-gray-300 px-3 py-1 rounded-full hover:bg-gray-200 dark:hover:bg-neutral-700 transition-colors"
                   >
                     {example}
                   </button>
@@ -218,7 +229,7 @@ const DatabaseQueryInterface = () => {
               value={directSQL}
               onChange={(e) => setDirectSQL(e.target.value)}
               placeholder="SELECT * FROM fact_flights WHERE departure_delay_minutes > 30 LIMIT 10"
-              className="w-full p-3 border border-gray-200 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-mono text-sm resize-none focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+              className="w-full p-3 border border-gray-200 dark:border-neutral-700 rounded-md bg-gray-50 dark:bg-neutral-900 text-gray-900 dark:text-gray-100 font-mono text-sm resize-none focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
               rows={4}
             />
           </div>
@@ -236,7 +247,7 @@ const DatabaseQueryInterface = () => {
           <button
             onClick={executeQuery}
             disabled={loading || (!query.trim() && !directSQL.trim())}
-            className="bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 px-6 py-2 rounded-md hover:bg-gray-700 dark:hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            className="bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 px-6 py-2 rounded-md hover:bg-black dark:hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {loading ? (
               <Loader className="w-4 h-4 animate-spin" />
@@ -250,7 +261,7 @@ const DatabaseQueryInterface = () => {
 
       {/* Database Schema */}
       {showSchema && (
-        <div className="bg-white dark:bg-gray-900 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+        <div className="bg-white dark:bg-neutral-950 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
           <h3 className="text-lg font-semibold mb-4 flex items-center gap-2 text-gray-900 dark:text-gray-100">
             <Table className="w-5 h-5" />
             Database Tables
@@ -260,7 +271,7 @@ const DatabaseQueryInterface = () => {
             {Object.entries(tableInfo).map(([tableName, columns]) => (
               <div
                 key={tableName}
-                className="border border-gray-200 dark:border-gray-700 rounded-lg p-4"
+                className="border border-gray-200 dark:border-neutral-800 rounded-lg p-4"
               >
                 <div className="flex justify-between items-center mb-3">
                   <h4 className="font-semibold text-gray-900 dark:text-gray-100">
@@ -268,17 +279,14 @@ const DatabaseQueryInterface = () => {
                   </h4>
                   <button
                     onClick={() => getSampleData(tableName)}
-                    className="text-xs bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 px-2 py-1 rounded"
+                    className="text-xs bg-gray-100 dark:bg-neutral-800 hover:bg-gray-200 dark:hover:bg-neutral-700 px-2 py-1 rounded"
                   >
                     Sample
                   </button>
                 </div>
                 <div className="space-y-1 text-sm">
                   {columns.slice(0, 5).map((col) => (
-                    <div
-                      key={col.column}
-                      className="flex justify-between"
-                    >
+                    <div key={col.column} className="flex justify-between">
                       <span
                         className={
                           col.key === "PRI"
@@ -307,7 +315,7 @@ const DatabaseQueryInterface = () => {
 
       {/* Results */}
       {result && (
-        <div className="bg-white dark:bg-gray-900 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+        <div className="bg-white dark:bg-neutral-950 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
           <div className="flex items-center gap-2 mb-4">
             {result.success ? (
               <CheckCircle className="w-5 h-5 text-gray-700 dark:text-gray-300" />
@@ -325,9 +333,9 @@ const DatabaseQueryInterface = () => {
             )}
           </div>
 
-          {/* Error state */}
+          {/* Error state (neutral gray, no red) */}
           {!result.success && result.error && (
-            <div className="text-sm text-red-600 dark:text-red-400">
+            <div className="text-sm text-gray-700 dark:text-gray-300">
               {result.error}
             </div>
           )}
@@ -344,7 +352,7 @@ const DatabaseQueryInterface = () => {
                   Copy
                 </button>
               </div>
-              <pre className="text-xs p-3 rounded-md bg-gray-50 dark:bg-gray-800 overflow-auto border border-gray-200 dark:border-gray-700">
+              <pre className="text-xs p-3 rounded-md bg-gray-50 dark:bg-neutral-900 overflow-auto border border-gray-200 dark:border-neutral-800">
                 {result.sqlQuery}
               </pre>
             </div>
@@ -359,15 +367,18 @@ const DatabaseQueryInterface = () => {
 
           {/* Data table */}
           {Array.isArray(result.data) && result.data.length > 0 && (
-            <div className="overflow-auto border border-gray-200 dark:border-gray-700 rounded-md">
+            <div className="overflow-auto border border-gray-200 dark:border-neutral-800 rounded-md">
               {(() => {
                 const cols = Object.keys(result.data[0]).slice(0, 50);
                 return (
                   <table className="min-w-full text-sm">
-                    <thead className="bg-gray-100 dark:bg-gray-800">
+                    <thead className="bg-gray-100 dark:bg-neutral-900">
                       <tr>
                         {cols.map((c) => (
-                          <th key={c} className="text-left px-3 py-2 font-semibold text-gray-900 dark:text-gray-100">
+                          <th
+                            key={c}
+                            className="text-left px-3 py-2 font-semibold text-gray-900 dark:text-gray-100"
+                          >
                             {c}
                           </th>
                         ))}
@@ -375,10 +386,18 @@ const DatabaseQueryInterface = () => {
                     </thead>
                     <tbody>
                       {result.data.slice(0, 100).map((row, i) => (
-                        <tr key={i} className="border-t border-gray-200 dark:border-gray-700">
+                        <tr
+                          key={i}
+                          className="border-t border-gray-200 dark:border-neutral-800"
+                        >
                           {cols.map((c) => (
-                            <td key={c} className="px-3 py-2 text-gray-800 dark:text-gray-200 whitespace-nowrap">
-                              {row[c] === null || row[c] === undefined ? "—" : String(row[c])}
+                            <td
+                              key={c}
+                              className="px-3 py-2 text-gray-800 dark:text-gray-200 whitespace-nowrap"
+                            >
+                              {row[c] === null || row[c] === undefined
+                                ? "—"
+                                : String(row[c])}
                             </td>
                           ))}
                         </tr>
@@ -406,21 +425,18 @@ const DatabaseQueryInterface = () => {
         </div>
       )}
 
-
       {/* Loading State */}
       {loading && (
-        <div className="bg-white dark:bg-gray-900 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
-          <div className="flex items-center gap-3">
-            <BeatLoader size={8} color="#555" />
-            <span className="text-gray-600 dark:text-gray-400">
-              Processing your query...
-            </span>
+        <div className="bg-white dark:bg-neutral-950 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
+          <div className="flex items-center gap-3 text-gray-600 dark:text-gray-400">
+            <BeatLoader size={8} color="#777" />
+            <span>Processing your query...</span>
           </div>
         </div>
       )}
 
       {/* Tips */}
-      <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-4">
+      <div className="bg-gray-50 dark:bg-neutral-800 rounded-lg p-4">
         <h4 className="font-semibold text-gray-900 dark:text-gray-100 mb-2">
           💡 Tips for better queries:
         </h4>

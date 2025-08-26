@@ -1,4 +1,6 @@
-// lib/ai-agent.ts
+// lib/ai-agent.ts — Refactored & Consolidated
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 import { ChatOllama } from "@langchain/ollama";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { Document } from "@langchain/core/documents";
@@ -10,10 +12,11 @@ import { OllamaEmbeddings } from "@langchain/community/embeddings/ollama";
 import { Pinecone } from "@pinecone-database/pinecone";
 import { PineconeStore } from "@langchain/pinecone";
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+import { RecursiveCharacterTextSplitter } from "@pinecone-database/doc-splitter";
 import prismadb from "@/lib/prismadb";
 import { rateLimit } from "@/lib/rate-limit";
 
-// Database tools (make sure these truly return JSON-able objects if using LangChain Tools)
+// DB tools (must return JSON-able results if used as Tools)
 import {
   executeSql,
   generateQueryPrompt,
@@ -23,38 +26,19 @@ import {
   sampleTable,
 } from "@/lib/database-tools";
 
-// Configuration
+// App config
 import { AVAILABLE_MODELS, type ModelKey } from "@/config/models";
 import { DATABASE_KEYWORDS, isDatabaseQuery } from "@/lib/database-detection";
 
-/* --------------------------- Embedding configuration --------------------------- */
-
+/* -----------------------------------------------------------------------------
+ * Embedding config
+ * -------------------------------------------------------------------------- */
 export const EMBEDDING_MODELS = {
-  "nomic-embed-text": {
-    dimensions: 768,
-    contextLength: 8192,
-    description: "Best overall local embedding model, trained for RAG",
-    chunkSize: 512,
-  },
-  "mxbai-embed-large": {
-    dimensions: 1024,
-    contextLength: 512,
-    description: "High-quality embeddings, good for semantic search",
-    chunkSize: 256,
-  },
-  "snowflake-arctic-embed": {
-    dimensions: 1024,
-    contextLength: 512,
-    description: "Strong performance on retrieval tasks",
-    chunkSize: 384,
-  },
-  "all-minilm": {
-    dimensions: 384,
-    contextLength: 256,
-    description: "Fast and lightweight, good for quick prototyping",
-    chunkSize: 128,
-  },
-};
+  "nomic-embed-text": { dimensions: 768, contextLength: 8192, description: "RAG-tuned local embeddings", chunkSize: 512 },
+  "mxbai-embed-large": { dimensions: 1024, contextLength: 512, description: "High-quality semantic search", chunkSize: 256 },
+  "snowflake-arctic-embed": { dimensions: 1024, contextLength: 512, description: "Strong retrieval performance", chunkSize: 384 },
+  "all-minilm": { dimensions: 384, contextLength: 256, description: "Fast & lightweight", chunkSize: 128 },
+} as const;
 
 interface EmbeddingConfig {
   model: string;
@@ -63,11 +47,11 @@ interface EmbeddingConfig {
   chunkOverlap: number;
   batchSize: number;
   enableMetadataFiltering: boolean;
-  useHierarchicalChunking: boolean;
-  enableSemanticChunking: boolean;
+  useHierarchicalChunking: boolean; // kept for compatibility
+  enableSemanticChunking: boolean;  // kept for compatibility
 }
 
-const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
+export const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
   model: "nomic-embed-text",
   baseUrl: "http://localhost:11434",
   chunkSize: 512,
@@ -78,47 +62,9 @@ const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
   enableSemanticChunking: false,
 };
 
-/* --------------------------------- Utilities --------------------------------- */
-
-function truncateStringByBytes(str: string, maxBytes: number): string {
-  const encoder = new TextEncoder();
-  if (encoder.encode(str).length <= maxBytes) return str;
-  let truncated = str;
-  while (encoder.encode(truncated).length > maxBytes) {
-    truncated = truncated.slice(0, -1);
-  }
-  return truncated;
-}
-
-export async function checkOllamaHealth(baseUrl = "http://localhost:11434"): Promise<boolean> {
-  try {
-    const res = await fetch(`${baseUrl}/api/tags`);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-// Renamed to avoid recursion with class method
-export async function pullOllamaModels(
-  models: string[] = ["nomic-embed-text"],
-  baseUrl = "http://localhost:11434"
-): Promise<void> {
-  for (const model of models) {
-    try {
-      await fetch(`${baseUrl}/api/pull`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: model }),
-      });
-    } catch (err) {
-      console.error(`Failed to pull model ${model}:`, err);
-    }
-  }
-}
-
-/* ------------------------------------ Types ----------------------------------- */
-
+/* -----------------------------------------------------------------------------
+ * Types
+ * -------------------------------------------------------------------------- */
 export interface AgentConfig {
   modelKey?: ModelKey;
   temperature?: number;
@@ -184,21 +130,13 @@ export interface AgentResponse {
   };
 }
 
-export type DocumentKey = {
-  documentName: string;
-  modelName: string;
-  userId: string;
-};
+export type DocumentKey = { documentName: string; modelName: string; userId: string; };
+export type GeneralChatKey = { modelName: string; userId: string; sessionId?: string };
 
-export type GeneralChatKey = {
-  modelName: string;
-  userId: string;
-  sessionId?: string;
-};
-
-/* --------------------------------- Prompts --------------------------------- */
-
-export const SYSTEM_PROMPTS = {
+/* -----------------------------------------------------------------------------
+ * Prompts
+ * -------------------------------------------------------------------------- */
+const SYSTEM_PROMPTS = {
   chat: `
 You are an intelligent AI assistant with specialized knowledge in aviation, airport operations, and flight data.
 
@@ -212,7 +150,7 @@ RESPONSE GUIDELINES:
 - Use reranked context when available
 
 CRITICAL: Always use actual database results when provided.
-`.trim(),
+  `.trim(),
 
   documentChat: `
 You analyze and answer questions about uploaded documents.
@@ -224,7 +162,7 @@ GUIDELINES:
 - Be concise but complete
 - Keep conversation context
 - Use reranked results when available
-`.trim(),
+  `.trim(),
 
   databaseExpert: `
 You are Querymancer, a MySQL specialist.
@@ -246,15 +184,14 @@ PRINCIPLES:
 
 Current date: ${new Date().toISOString().slice(0, 10)}
 Audience: business analysts and data scientists.
-`.trim(),
+  `.trim(),
 
-  reranking: `
-Return 0.0-1.0 relevance scores. Be precise and consistent.
-`.trim(),
+  reranking: `Return 0.0-1.0 relevance scores. Be precise and consistent.`.trim(),
 };
 
-/* ------------------------------ Default config ------------------------------ */
-
+/* -----------------------------------------------------------------------------
+ * Default agent config
+ * -------------------------------------------------------------------------- */
 const DEFAULT_CONFIG: Required<AgentConfig> = {
   modelKey: "deepseek-r1:7b",
   temperature: 0.2,
@@ -270,79 +207,102 @@ const DEFAULT_CONFIG: Required<AgentConfig> = {
   maxContextLength: 6000,
 };
 
-/* ------------------------- Memory Manager (fixed) ------------------------- */
+/* -----------------------------------------------------------------------------
+ * Utilities
+ * -------------------------------------------------------------------------- */
+const enc = new TextEncoder();
+function truncateStringByBytes(str: string, maxBytes: number): string {
+  if (enc.encode(str).length <= maxBytes) return str;
+  let t = str;
+  while (enc.encode(t).length > maxBytes) t = t.slice(0, -1);
+  return t;
+}
 
+export async function checkOllamaHealth(baseUrl = "http://localhost:11434"): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl}/api/tags`);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function pullOllamaModels(models: string[] = ["nomic-embed-text"], baseUrl = "http://localhost:11434") {
+  await Promise.all(
+    models.map(async (m) => {
+      try {
+        await fetch(`${baseUrl}/api/pull`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: m }),
+        });
+      } catch (e) {
+        console.error(`Failed to pull model ${m}:`, e);
+      }
+    })
+  );
+}
+
+/* -----------------------------------------------------------------------------
+ * Memory Manager (consolidated)
+ * -------------------------------------------------------------------------- */
 class MemoryManager {
   private static instance: MemoryManager;
-  private history: Redis;
-  private vectorDBClient: Pinecone;
+  private redis: Redis;
+  private pinecone: Pinecone;
   private embeddings: OllamaEmbeddings;
-  private embeddingConfig: EmbeddingConfig;
+  private cfg: EmbeddingConfig;
 
-  private static readonly KNOWLEDGE_BASE_NAMESPACE = "knowledge_base";
-  private static readonly GENERAL_CHAT_PREFIX = "general_chat";
+  private static readonly NS_KB = "knowledge_base";
+  private static readonly NS_CHAT_PREFIX = "general_chat";
 
-  constructor(embeddingConfig?: Partial<EmbeddingConfig>) {
-    this.history = Redis.fromEnv();
-    this.vectorDBClient = new Pinecone({ apiKey: process.env.PINECONE_API_KEY! });
-    this.embeddingConfig = { ...DEFAULT_EMBEDDING_CONFIG, ...embeddingConfig };
-
-    this.embeddings = new OllamaEmbeddings({
-      model: this.embeddingConfig.model,
-      baseUrl: this.embeddingConfig.baseUrl,
-    });
+  constructor(override?: Partial<EmbeddingConfig>) {
+    this.redis = Redis.fromEnv();
+    this.pinecone = new Pinecone({ apiKey: process.env.PINECONE_API_KEY! });
+    this.cfg = { ...DEFAULT_EMBEDDING_CONFIG, ...override };
+    this.embeddings = new OllamaEmbeddings({ model: this.cfg.model, baseUrl: this.cfg.baseUrl });
   }
 
-  private async getStore(namespace?: string) {
-    const pineconeIndex = this.vectorDBClient.Index(process.env.PINECONE_INDEX!);
-    return PineconeStore.fromExistingIndex(this.embeddings, {
-      pineconeIndex,
-      textKey: "text",
-      namespace,
-    });
-  }
-
-  public async init() {
-    const isHealthy = await this.healthCheck();
-    if (!isHealthy) {
-      console.warn("Ollama embeddings not healthy; embedding features may be limited.");
+  static async getInstance(override?: Partial<EmbeddingConfig>) {
+    if (!MemoryManager.instance) {
+      MemoryManager.instance = new MemoryManager(override);
+      await MemoryManager.instance.healthCheck(); // warmup
     }
+    return MemoryManager.instance;
   }
 
-  public getEmbeddingInfo() {
-    return {
-      model: this.embeddingConfig.model,
-      config: this.embeddingConfig,
-      modelDetails: EMBEDDING_MODELS[this.embeddingConfig.model as keyof typeof EMBEDDING_MODELS],
-      isHealthy: false, // updated by healthCheck if you want to expose it
-    };
+  /* ---------- helpers ---------- */
+  private index() {
+    return this.pinecone.Index(process.env.PINECONE_INDEX!);
   }
-
-  private preprocessText(text: string): string {
-    let t = text.replace(/\s+/g, " ");
-    t = t.replace(/([a-z])([A-Z])/g, "$1 $2");
-    t = t.replace(/([.!?])([A-Z])/g, "$1 $2");
-    t = t.replace(/^Page \d+.*$/gm, "");
-    t = t.replace(/^\d+\s*$/gm, "");
-    t = t.replace(/[""]/g, '"').replace(/[–—]/g, "-");
-    return t.trim();
+  private async store(namespace?: string) {
+    return PineconeStore.fromExistingIndex(this.embeddings, { pineconeIndex: this.index(), textKey: "text", namespace });
   }
-
-  private classifyChunkType(content: string): "title" | "paragraph" | "list" | "table" | "unknown" {
-    const trimmed = content.trim();
-    if (trimmed.length < 100 && /^[A-Z][^.!?]*$/.test(trimmed)) return "title";
-    if (/^[\s]*[-•*]\s/.test(trimmed) || /^\d+\.\s/.test(trimmed)) return "list";
-    if (/\|\s*\w+\s*\|/.test(trimmed) || trimmed.split("\t").length > 2) return "table";
-    return trimmed.length > 50 ? "paragraph" : "unknown";
+  private preprocess(text: string) {
+    return text
+      .replace(/\s+/g, " ")
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .replace(/([.!?])([A-Z])/g, "$1 $2")
+      .replace(/^Page \d+.*$/gm, "")
+      .replace(/^\d+\s*$/gm, "")
+      .replace(/[""]/g, '"')
+      .replace(/[–—]/g, "-")
+      .trim();
   }
-
+  private classify(content: string): "title" | "paragraph" | "list" | "table" | "unknown" {
+    const t = content.trim();
+    if (t.length < 100 && /^[A-Z][^.!?]*$/.test(t)) return "title";
+    if (/^[\s]*[-•*]\s/.test(t) || /^\d+\.\s/.test(t)) return "list";
+    if (/\|\s*\w+\s*\|/.test(t) || t.split("\t").length > 2) return "table";
+    return t.length > 50 ? "paragraph" : "unknown";
+  }
   private makeDoc(content: string, metadata: Record<string, any>) {
-    const pageContent = this.preprocessText(content);
+    const pageContent = this.preprocess(content);
     return new Document({
       pageContent,
       metadata: {
         processingTimestamp: new Date().toISOString(),
-        chunkType: this.classifyChunkType(pageContent),
+        chunkType: this.classify(pageContent),
         wordCount: pageContent.split(/\s+/).length,
         tokenEstimate: Math.ceil(pageContent.length / 4),
         ...metadata,
@@ -351,289 +311,135 @@ class MemoryManager {
     });
   }
 
-  // Health check for Ollama connection
+  /* ---------- health ---------- */
   async healthCheck(): Promise<boolean> {
     try {
-      const testEmbedding = await this.embeddings.embedQuery("test");
-      return Array.isArray(testEmbedding) && testEmbedding.length > 0;
-    } catch (error) {
-      console.error("Ollama health check failed:", error);
+      const v = await this.embeddings.embedQuery("ping");
+      return Array.isArray(v) && v.length > 0;
+    } catch (e) {
+      console.warn("Ollama embeddings health check failed:", e);
       return false;
     }
   }
-
-  public static async getInstance(embeddingConfig?: Partial<EmbeddingConfig>) {
-    if (!MemoryManager.instance) {
-      MemoryManager.instance = new MemoryManager(embeddingConfig);
-      await MemoryManager.instance.init();
-    }
-    return MemoryManager.instance;
-  }
-
-  public async addToKnowledgeBase(content: string, metadata: Record<string, any> = {}) {
+  async ensureEmbeddingModelsAvailable() {
     try {
-      const store = await this.getStore(MemoryManager.KNOWLEDGE_BASE_NAMESPACE);
-      const doc = this.makeDoc(content, {
-        ...metadata,
-        documentId: metadata.documentId || "knowledge_base",
-        addedAt: Date.now(),
-      });
-      await store.addDocuments([doc]);
+      await pullOllamaModels([this.cfg.model], this.cfg.baseUrl);
       return true;
-    } catch (err) {
-      console.error("Failed to add to knowledge base:", err);
+    } catch {
       return false;
     }
   }
-
- public async processFile(
-  fileUrl: string,
-  documentId: string,
-  options: { chunkSize?: number; chunkOverlap?: number; enableHierarchicalChunking?: boolean } = {}
-): Promise<string[]> {
-  if (!fileUrl) throw new Error("fileUrl is required");
-
-  let loader: PDFLoader;
-
-  if (/^https?:\/\//i.test(fileUrl)) {
-    // fetch to memory then pass bytes (Uint8Array) to PDFLoader
-    const res = await fetch(fileUrl, { headers: { Accept: "application/pdf" } });
-    if (!res.ok) throw new Error(`Failed to fetch PDF: ${res.status} ${res.statusText}`);
-    const ab = await res.arrayBuffer();
-    loader = new PDFLoader(new Blob([ab], { type: "application/pdf" }), {
-      // You can pass your pdfjs import if needed:
-      // pdfjs: () => import("pdfjs-dist/legacy/build/pdf.js"),
-      parsedItemSeparator: "\n\n",
-    });
-  } else {
-    // Local file path on disk
-    loader = new PDFLoader(fileUrl, { parsedItemSeparator: "\n\n" });
+  getEmbeddingInfo() {
+    return {
+      model: this.cfg.model,
+      config: this.cfg,
+      modelDetails: EMBEDDING_MODELS[this.cfg.model as keyof typeof EMBEDDING_MODELS],
+    };
   }
 
-  const pages = await loader.load();
+  /* ---------- ingest ---------- */
+  async processFile(
+    fileUrl: string,
+    documentId: string,
+    options: { chunkSize?: number; chunkOverlap?: number } = {}
+  ): Promise<string[]> {
+    if (!fileUrl) throw new Error("fileUrl is required");
 
-  const chunkSize = options.chunkSize ?? this.embeddingConfig.chunkSize;
-  const chunkOverlap = options.chunkOverlap ?? this.embeddingConfig.chunkOverlap;
+    let loader: PDFLoader;
+    if (/^https?:\/\//i.test(fileUrl)) {
+      const res = await fetch(fileUrl, { headers: { Accept: "application/pdf" } });
+      if (!res.ok) throw new Error(`Failed to fetch PDF: ${res.status} ${res.statusText}`);
+      const ab = await res.arrayBuffer();
+      loader = new PDFLoader(new Blob([ab], { type: "application/pdf" }), { parsedItemSeparator: "\n\n" });
+    } else {
+      loader = new PDFLoader(fileUrl, { parsedItemSeparator: "\n\n" });
+    }
 
-  const { RecursiveCharacterTextSplitter } = await import("@pinecone-database/doc-splitter");
-  const splitter = new RecursiveCharacterTextSplitter({
-    chunkSize,
-    chunkOverlap,
-    separators: ["\n\n", "\n", ".", "!", "?", ";", ",", " ", ""],
-  });
+    const pages = await loader.load();
+    const chunkSize = options.chunkSize ?? this.cfg.chunkSize;
+    const chunkOverlap = options.chunkOverlap ?? this.cfg.chunkOverlap;
 
-  const pageDocs = pages.map(
-    (p, i) =>
-      new Document({
-        pageContent: this.preprocessText(p.pageContent.replace(/\n/g, " ").trim()),
-        metadata: { pageNumber: p.metadata?.loc?.pageNumber || i + 1, documentId },
-      })
-  );
+    const baseDocs = pages.map(
+      (p, i) =>
+        new Document({
+          pageContent: this.preprocess(p.pageContent.replace(/\n/g, " ").trim()),
+          metadata: { pageNumber: p.metadata?.loc?.pageNumber || i + 1, documentId },
+        })
+    );
 
-  const chunks = await splitter.splitDocuments(pageDocs);
-  const docs = chunks.map((c, idx) =>
-    this.makeDoc(c.pageContent, { ...c.metadata, chunkIndex: idx, documentId })
-  );
-
-  const store = await this.getStore(documentId);
-  const ids: string[] = [];
-  const batchSize = this.embeddingConfig.batchSize;
-
-  for (let i = 0; i < docs.length; i += batchSize) {
-    const batch = docs.slice(i, i + batchSize);
-    const res = await store.addDocuments(batch, {
-      ids: batch.map((_, j) => `${documentId}_chunk_${i + j}`),
+    const splitter = new RecursiveCharacterTextSplitter({
+      chunkSize,
+      chunkOverlap,
+      separators: ["\n\n", "\n", ".", "!", "?", ";", ",", " ", ""],
     });
-    ids.push(...res);
-    if (i > 0) await new Promise(r => setTimeout(r, 300));
+
+    const chunks = await splitter.splitDocuments(baseDocs);
+    const docs = chunks.map((c, idx) => this.makeDoc(c.pageContent, { ...c.metadata, chunkIndex: idx, documentId }));
+
+    const store = await this.store(documentId);
+    const ids: string[] = [];
+    for (let i = 0; i < docs.length; i += this.cfg.batchSize) {
+      const batch = docs.slice(i, i + this.cfg.batchSize);
+      const res = await store.addDocuments(
+        batch,
+        { ids: batch.map((_, j) => `${documentId}_chunk_${i + j}`) }
+      );
+      ids.push(...res);
+      if (i > 0) await new Promise((r) => setTimeout(r, 250));
+    }
+    return ids;
   }
 
-  return ids;
-}
-
-  public async advancedSearch(
+  /* ---------- search (single path, many wrappers) ---------- */
+  private async searchCore(
+    namespace: string,
     query: string,
-    options: {
-      namespace?: string;
-      filters?: Record<string, any>;
-      topK?: number;
-      useReranking?: boolean;
-      modelKey?: ModelKey;
-      rerankingThreshold?: number;
-      chunkTypes?: Array<"title" | "paragraph" | "list" | "table">;
-      dateRange?: { start: number; end: number };
-    } = {}
-  ) {
-    const {
-      namespace = MemoryManager.KNOWLEDGE_BASE_NAMESPACE,
-      filters = {},
+    {
       topK = 5,
-      useReranking = false,
+      filters,
+      useReranking,
       modelKey,
-      rerankingThreshold,
-      chunkTypes,
-      dateRange,
-    } = options;
-
-    try {
-      const store = await this.getStore(namespace);
-
-      const simpleFilter: Record<string, any> = { ...filters };
-      if (chunkTypes?.length === 1) simpleFilter.chunkType = chunkTypes[0];
-      if (dateRange) {
-        simpleFilter.timestamp = { gte: dateRange.start, lte: dateRange.end };
-      }
-
-      const k = useReranking ? Math.min(topK * 2, 20) : topK;
-      const results = await store.similaritySearchWithScore(query, k, this.embeddingConfig.enableMetadataFiltering ? simpleFilter : undefined);
-
-      const docs = results.map(([doc, score]) => {
-        doc.metadata = { ...doc.metadata, searchScore: score };
-        return doc;
-      });
-
-      if (useReranking && docs.length > 1) {
-        const rer = await this.rerankDocuments(query, docs, modelKey, rerankingThreshold);
-        return { documents: rer.slice(0, topK).map((r) => r.document), rerankingResults: rer.slice(0, topK) };
-      }
-
-      return { documents: docs.slice(0, topK), rerankingResults: [] };
-    } catch (err) {
-      console.warn("advancedSearch failed", err);
-      return { documents: [], rerankingResults: [] };
-    }
-  }
-
-  public async writeToGeneralChatHistory(text: string, chatKey: GeneralChatKey) {
-    if (!chatKey?.userId) {
-      console.warn("Chat key set incorrectly");
-      return "";
-    }
-
-    const key = this.generateRedisGeneralChatKey(chatKey);
-    const result = await this.history.zadd(key, { score: Date.now(), member: text });
-
-    try {
-      const store = await this.getStore(`${MemoryManager.GENERAL_CHAT_PREFIX}-${chatKey.userId}`);
-      const doc = this.makeDoc(text, {
-        userMsg: text.startsWith("User:"),
-        chatSession: chatKey.sessionId || "default",
-        userId: chatKey.userId,
-        modelName: chatKey.modelName,
-        timestamp: Date.now(),
-      });
-      await store.addDocuments([doc]);
-    } catch (err) {
-      console.warn("Vector add failed (chat history):", err);
-    }
-
-    return result;
-  }
-
-  public async readLatestHistory(documentKey: DocumentKey): Promise<string> {
-    if (!documentKey?.userId) return "";
-    const key = this.generateRedisDocumentKey(documentKey);
-    const result = await this.history.zrange(key, 0, Date.now(), { byScore: true });
-    const recent = result.slice(-30).reverse();
-    return recent.join("\n");
-  }
-
-  public async readLatestGeneralChatHistory(chatKey: GeneralChatKey): Promise<string> {
-    if (!chatKey?.userId) return "";
-    const key = this.generateRedisGeneralChatKey(chatKey);
-    const result = await this.history.zrange(key, 0, Date.now(), { byScore: true });
-    const recent = result.slice(-30).reverse();
-    return recent.join("\n");
-  }
-
-  public async vectorSearch(
-    query: string,
-    documentNamespace: string,
-    filterUserMessages: boolean,
-    useReranking = false,
-    modelKey?: ModelKey,
-    rerankingThreshold?: number
+      threshold,
+    }: { topK?: number; filters?: Record<string, any>; useReranking?: boolean; modelKey?: ModelKey; threshold?: number } = {}
   ) {
-    try {
-      const store = await this.getStore(documentNamespace);
-      const filter = this.embeddingConfig.enableMetadataFiltering ? (filterUserMessages ? { userMsg: true } : undefined) : undefined;
+    const store = await this.store(namespace);
+    const filter = this.cfg.enableMetadataFiltering ? filters : undefined;
+    const k = Math.min(useReranking ? topK * 2 : topK, 20);
+    const scored = await store.similaritySearchWithScore(query, k, filter);
 
-      const k = useReranking ? 10 : 10;
-      const docs = await store.similaritySearch(query, k, filter);
+    const docs = scored.map(([doc, score]) => {
+      doc.metadata = { ...doc.metadata, searchScore: score };
+      return doc;
+    });
 
-      if (useReranking && docs.length > 1) {
-        const rer = await this.rerankDocuments(query, docs, modelKey, rerankingThreshold);
-        return { documents: rer.map((r) => r.document), rerankingResults: rer };
-      }
-
-      return { documents: docs, rerankingResults: [] };
-    } catch (err) {
-      console.warn("vectorSearch failed", err);
-      return { documents: [], rerankingResults: [] };
+    if (useReranking && docs.length > 1) {
+      const rer = await this.rerankDocuments(query, docs, modelKey, threshold);
+      return { documents: rer.slice(0, topK).map((r) => r.document), rerankingResults: rer.slice(0, topK) };
     }
+    return { documents: docs.slice(0, topK), rerankingResults: [] as RerankingResult[] };
   }
 
-  public async knowledgeBaseSearch(
-    query: string,
-    topK = 5,
-    filters?: Record<string, any>,
-    useReranking = false,
-    modelKey?: ModelKey,
-    rerankingThreshold?: number
-  ) {
-    try {
-      const store = await this.getStore(MemoryManager.KNOWLEDGE_BASE_NAMESPACE);
-      const simpleFilter = this.embeddingConfig.enableMetadataFiltering ? { ...(filters || {}) } : undefined;
-      const k = Math.min(useReranking ? topK * 2 : topK, 20);
-      const res = await store.similaritySearchWithScore(query, k, simpleFilter);
-
-      const docs = res.map(([doc, score]) => {
-        doc.metadata = { ...doc.metadata, searchScore: score };
-        return doc;
-      });
-
-      if (useReranking && docs.length > 1) {
-        const rer = await this.rerankDocuments(query, docs, modelKey, rerankingThreshold);
-        return { documents: rer.slice(0, topK).map((r) => r.document), rerankingResults: rer.slice(0, topK) };
-      }
-      return { documents: docs.slice(0, topK), rerankingResults: [] };
-    } catch (err) {
-      console.warn("knowledgeBaseSearch failed", err);
-      return { documents: [], rerankingResults: [] };
-    }
+  knowledgeBaseSearch(query: string, topK = 5, filters?: Record<string, any>, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
+    return this.searchCore(MemoryManager.NS_KB, query, { topK, filters, useReranking, modelKey, threshold });
   }
 
-  public async searchSimilarConversations(
-    query: string,
-    userId: string,
-    topK = 3,
-    useReranking = false,
-    modelKey?: ModelKey,
-    rerankingThreshold?: number
-  ) {
-    try {
-      const ns = `${MemoryManager.GENERAL_CHAT_PREFIX}-${userId}`;
-      const store = await this.getStore(ns);
-      const filter = this.embeddingConfig.enableMetadataFiltering ? { userId } : undefined;
-      const k = Math.min(useReranking ? topK * 2 : topK, 10);
-      const docs = await store.similaritySearch(query, k, filter);
-
-      if (useReranking && docs.length > 1) {
-        const rer = await this.rerankDocuments(query, docs, modelKey, rerankingThreshold);
-        return { documents: rer.slice(0, topK).map((r) => r.document), rerankingResults: rer.slice(0, topK) };
-      }
-      return { documents: docs.slice(0, topK), rerankingResults: [] };
-    } catch (err) {
-      console.warn("searchSimilarConversations failed", err);
-      return { documents: [], rerankingResults: [] };
-    }
+  vectorSearch(query: string, documentNamespace: string, filterUserMessages: boolean, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
+    const filters = filterUserMessages && this.cfg.enableMetadataFiltering ? { userMsg: true } : undefined;
+    return this.searchCore(documentNamespace, query, { topK: 10, filters, useReranking, modelKey, threshold });
   }
 
-  public async rerankDocuments(
+  searchSimilarConversations(query: string, userId: string, topK = 3, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
+    const ns = `${MemoryManager.NS_CHAT_PREFIX}-${userId}`;
+    const filters = this.cfg.enableMetadataFiltering ? { userId } : undefined;
+    return this.searchCore(ns, query, { topK, filters, useReranking, modelKey, threshold });
+  }
+
+  /* ---------- reranking ---------- */
+  async rerankDocuments(
     query: string,
     documents: Document[],
     modelKey: ModelKey = "deepseek-r1:7b",
-    threshold: number = 0.5
+    threshold = 0.5
   ): Promise<RerankingResult[]> {
     if (!documents.length) return [];
     try {
@@ -645,35 +451,28 @@ class MemoryManager {
       });
 
       const results: RerankingResult[] = [];
-      const batchSize = 5;
+      const B = 5;
 
-      for (let i = 0; i < documents.length; i += batchSize) {
-        const batch = documents.slice(i, i + batchSize);
+      for (let i = 0; i < documents.length; i += B) {
+        const batch = documents.slice(i, i + B);
         const prompt =
           `Query: "${query}"\n\nRate each document 0.0-1.0\n` +
           batch
-            .map(
-              (doc, idx) =>
-                `Document ${i + idx + 1}:\n${String(doc.pageContent).slice(0, 700)}\n`
-            )
+            .map((doc, j) => `Document ${i + j + 1}:\n${String(doc.pageContent).slice(0, 700)}\n`)
             .join("\n") +
-          `\nReply with lines "Document N: 0.X"`; // keep it dead simple
+          `\nReply with lines "Document N: 0.X"`;
 
         const resp = await model.invoke([new SystemMessage(SYSTEM_PROMPTS.reranking), new HumanMessage(prompt)]);
-        const lines = String(resp.content).trim().split(/\n+/);
-        const scores = lines
+        const scores = String(resp.content)
+          .trim()
+          .split(/\n+/)
           .map((l) => parseFloat(l.split(":").pop()!.trim()))
-          .filter((n) => !isNaN(n));
+          .filter((n) => !Number.isNaN(n));
 
         batch.forEach((doc, j) => {
           const s = scores[j] ?? 0.5;
           if (s >= threshold) {
-            results.push({
-              document: doc,
-              relevanceScore: s,
-              originalRank: i + j,
-              newRank: -1,
-            });
+            results.push({ document: doc, relevanceScore: s, originalRank: i + j, newRank: -1 });
           }
         });
       }
@@ -681,85 +480,88 @@ class MemoryManager {
       results.sort((a, b) => b.relevanceScore - a.relevanceScore);
       results.forEach((r, idx) => (r.newRank = idx));
       return results;
-    } catch (err) {
-      console.warn("Reranking failed; returning neutral ranks", err);
-      return documents.map((d, i) => ({
-        document: d,
-        relevanceScore: 0.5,
-        originalRank: i,
-        newRank: i,
-      }));
+    } catch (e) {
+      console.warn("Reranking failed; returning neutral ranks", e);
+      return documents.map((d, i) => ({ document: d, relevanceScore: 0.5, originalRank: i, newRank: i }));
     }
   }
 
-  public async writeToHistory(text: string, documentKey: DocumentKey) {
-    if (!documentKey?.userId) return "";
-    const key = this.generateRedisDocumentKey(documentKey);
-    const res = await this.history.zadd(key, { score: Date.now(), member: text });
+  /* ---------- chat history (Redis + vectors) ---------- */
+  private docKey(k: DocumentKey) {
+    return `${k.documentName}-${k.modelName}-${k.userId}`;
+  }
+  private chatKey(k: GeneralChatKey) {
+    return `${MemoryManager.NS_CHAT_PREFIX}-${k.userId}-${k.modelName}-${k.sessionId || "default"}`;
+  }
 
+  async writeToHistory(text: string, key: DocumentKey) {
+    await this.redis.zadd(this.docKey(key), { score: Date.now(), member: text });
     try {
-      const store = await this.getStore(documentKey.documentName);
-      const doc = this.makeDoc(text, {
-        userMsg: text.startsWith("User:"),
-        documentId: documentKey.documentName,
-        userId: documentKey.userId,
-        modelName: documentKey.modelName,
-      });
+      const store = await this.store(key.documentName);
+      const doc = this.makeDoc(text, { userMsg: text.startsWith("User:"), documentId: key.documentName, userId: key.userId, modelName: key.modelName });
       await store.addDocuments([doc]);
-    } catch (err) {
-      console.warn("Vector add failed (doc history):", err);
+    } catch (e) {
+      console.warn("Vector add failed (doc history):", e);
     }
-    return res;
   }
 
-  private generateRedisDocumentKey(documentKey: DocumentKey) {
-    return `${documentKey.documentName}-${documentKey.modelName}-${documentKey.userId}`;
-  }
-
-  private generateRedisGeneralChatKey(chatKey: GeneralChatKey) {
-    const sessionId = chatKey.sessionId || "default";
-    return `${MemoryManager.GENERAL_CHAT_PREFIX}-${chatKey.userId}-${chatKey.modelName}-${sessionId}`;
-  }
-
-  public async ensureEmbeddingModelsAvailable(): Promise<boolean> {
+  async writeToGeneralChatHistory(text: string, key: GeneralChatKey) {
+    await this.redis.zadd(this.chatKey(key), { score: Date.now(), member: text });
     try {
-      await pullOllamaModels([this.embeddingConfig.model], this.embeddingConfig.baseUrl);
+      const store = await this.store(`${MemoryManager.NS_CHAT_PREFIX}-${key.userId}`);
+      const doc = this.makeDoc(text, { userMsg: text.startsWith("User:"), chatSession: key.sessionId || "default", userId: key.userId, modelName: key.modelName, timestamp: Date.now() });
+      await store.addDocuments([doc]);
+    } catch (e) {
+      console.warn("Vector add failed (chat history):", e);
+    }
+  }
+
+  async readLatestHistory(key: DocumentKey) {
+    const res = await this.redis.zrange(this.docKey(key), 0, Date.now(), { byScore: true });
+    return res.slice(-30).reverse().join("\n");
+    }
+  async readLatestGeneralChatHistory(key: GeneralChatKey) {
+    const res = await this.redis.zrange(this.chatKey(key), 0, Date.now(), { byScore: true });
+    return res.slice(-30).reverse().join("\n");
+  }
+
+  /* ---------- convenience ---------- */
+  async addToKnowledgeBase(content: string, metadata: Record<string, any> = {}) {
+    try {
+      const store = await this.store(MemoryManager.NS_KB);
+      await store.addDocuments([this.makeDoc(content, { ...metadata, documentId: metadata.documentId || "knowledge_base", addedAt: Date.now() })]);
       return true;
-    } catch {
+    } catch (e) {
+      console.error("KB add failed:", e);
       return false;
     }
   }
 }
 
-/* ------------------------- Database Query Executor ------------------------- */
-
+/* -----------------------------------------------------------------------------
+ * Database Query Executor (trimmed but equivalent capability)
+ * -------------------------------------------------------------------------- */
 class DatabaseQueryExecutor {
-  private modelKey: ModelKey;
-  private includePerformanceMetrics: boolean;
+  constructor(private modelKey: ModelKey, private withPerf = false) {}
 
-  constructor(modelKey: ModelKey, includePerformanceMetrics = false) {
-    this.modelKey = modelKey;
-    this.includePerformanceMetrics = includePerformanceMetrics;
-  }
-
-  private createModel(temperature = 0.0): ChatOllama {
+  private model(temp = 0.0) {
     return new ChatOllama({
       baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
       model: this.modelKey,
-      temperature,
+      temperature: temp,
       keepAlive: "10m",
     });
   }
 
-  private extractSQLFromResponse(response: string): string | null {
-    const strategies = [
+  private extractSQL(s: string): string | null {
+    const tryRe = [
       /```sql\s*([\s\S]*?)```/i,
       /```\s*(SELECT[\s\S]*?)```/i,
       /^\s*(SELECT[\s\S]*?)\s*$/im,
       /(SELECT[\s\S]*?);?\s*$/im,
     ];
-    for (const re of strategies) {
-      const m = response.match(re);
+    for (const re of tryRe) {
+      const m = s.match(re);
       if (m?.[1]) {
         const sql = m[1].trim().replace(/;$/, "");
         if (/^SELECT\s/i.test(sql) && sql.length > 20) return sql;
@@ -768,130 +570,93 @@ class DatabaseQueryExecutor {
     return null;
   }
 
-  private getQueryComplexity(sqlQuery: string): "low" | "medium" | "high" {
-    const q = sqlQuery.toUpperCase();
-    const hasJoin = q.includes(" JOIN ");
-    const hasGroup = q.includes(" GROUP BY ");
-    if (hasJoin && hasGroup) return "high";
-    if (hasJoin || hasGroup) return "medium";
+  private complexity(sql: string): "low" | "medium" | "high" {
+    const q = sql.toUpperCase();
+    const join = q.includes(" JOIN ");
+    const grp = q.includes(" GROUP BY ");
+    if (join && grp) return "high";
+    if (join || grp) return "medium";
     return "low";
   }
 
-  private async generateSummary(userMessage: string, data: Record<string, any>[]): Promise<string> {
-    if (!data?.length) return "";
+  private async summarize(userMsg: string, rows: any[]): Promise<string> {
+    if (!rows?.length) return "";
     try {
-      const model = this.createModel(0.2);
+      const m = this.model(0.2);
       const prompt = `Summarize 2-3 insights in business language.
 
-Question: ${userMessage}
-Rows: ${data.length}
-Sample: ${JSON.stringify(data.slice(0, 2), null, 2)}
+Question: ${userMsg}
+Rows: ${rows.length}
+Sample: ${JSON.stringify(rows.slice(0, 2), null, 2)}
 
 Focus on key numbers, patterns, and actions. Keep it short:`;
-
-      const resp = await model.invoke([new HumanMessage(prompt)]);
-      return String(resp.content);
+      const r = await m.invoke([new HumanMessage(prompt)]);
+      return String(r.content || "");
     } catch {
-      return `Query OK: ${data.length} rows, ${Object.keys(data[0] || {}).length} columns.`;
+      return `Query OK: ${rows.length} rows, ${Object.keys(rows[0] || {}).length} columns.`;
     }
+  }
+
+  private async buildToolSQL(userMessage: string): Promise<{ table: string; sql: string }> {
+    // 1) tables
+    const tablesRaw: any = await listTables.invoke({ reasoning: `User asks: "${userMessage}"` });
+    const tables: string[] = Array.isArray(tablesRaw)
+      ? tablesRaw.map((t: any) => (typeof t === "string" ? t : t?.name)).filter(Boolean)
+      : JSON.parse(typeof tablesRaw === "string" ? tablesRaw : "[]");
+    const lower = userMessage.toLowerCase();
+    const pick = (kw: string) => tables.find((t) => t.toLowerCase().includes(kw));
+    const table = pick("flight") || pick("airline") || pick("airport") || tables[0];
+    if (!table) throw new Error("No suitable table found");
+
+    // 2) describe
+    const descRaw: any = await describeTable.invoke({ table_name: table, include_indexes: false });
+    const desc = typeof descRaw === "string" ? descRaw : JSON.stringify(descRaw, null, 2);
+
+    // 3) generate SQL
+    const m = this.model(0.1);
+    const prompt = `Generate a SELECT for: "${userMessage}"
+
+Table: ${table}
+Structure (use ONLY real columns):
+${desc}
+
+Rules:
+- Valid MySQL
+- LIMIT 50
+- Output ONLY SQL (no markdown, no prose)`;
+    const out = await m.invoke([new HumanMessage(prompt)]);
+    const sql = this.extractSQL(String(out.content)) || String(out.content).trim();
+    if (!/^SELECT\s/i.test(sql)) throw new Error("No valid SELECT generated");
+    return { table, sql };
   }
 
   async executeQuery(userMessage: string): Promise<DatabaseQueryResult> {
-    const start = Date.now();
+    const started = Date.now();
     try {
-      const toolRes = await this.executeWithTools(userMessage);
-      if (toolRes.success && toolRes.data?.length) {
+      // Try tool path first
+      const { sql } = await this.buildToolSQL(userMessage);
+      const execRaw: any = await executeSql.invoke({ sql_query: sql, explain_plan: false });
+      const result = typeof execRaw === "string" ? JSON.parse(execRaw) : execRaw;
+
+      if (result?.success && result.data) {
+        const summary = await this.summarize(userMessage, result.data);
         return {
-          ...toolRes,
-          performance: this.includePerformanceMetrics
-            ? {
-                executionTime: Date.now() - start,
-                rowCount: toolRes.data.length,
-                queryComplexity: this.getQueryComplexity(toolRes.sqlQuery || ""),
-              }
+          success: true,
+          data: result.data,
+          sqlQuery: sql,
+          summary,
+          performance: this.withPerf
+            ? { executionTime: Date.now() - started, rowCount: result.data.length, queryComplexity: this.complexity(sql) }
             : undefined,
         };
       }
-      return this.executeWithLegacyMethod(userMessage);
-    } catch (err: any) {
-      return {
-        success: false,
-        error: `Database query failed: ${err.message}`,
-        performance: this.includePerformanceMetrics
-          ? { executionTime: Date.now() - start, rowCount: 0, queryComplexity: "medium" }
-          : undefined,
-      };
-    }
-  }
-
-  private async executeWithTools(userMessage: string): Promise<DatabaseQueryResult> {
-    try {
-      const model = this.createModel(0.1);
-
-      // If these are LangChain Tools, they often return objects already:
-      const tablesResult: any = await listTables.invoke({
-        reasoning: `User wants: "${userMessage}". Identify relevant tables.`,
-      });
-
-      const tables: string[] =
-        Array.isArray(tablesResult)
-          ? tablesResult.map((t: any) => (typeof t === "string" ? t : t.name)).filter(Boolean)
-          : JSON.parse(typeof tablesResult === "string" ? tablesResult : "[]");
-
-      const lower = userMessage.toLowerCase();
-      const pick = (kw: string) => tables.find((t) => t.toLowerCase().includes(kw));
-      const tableName = pick("airline") || pick("airport") || pick("flight") || tables[0];
-
-      if (!tableName) throw new Error("No suitable table found");
-
-      const structureResult: any = await describeTable.invoke({
-        reasoning: `Need structure for ${tableName}`,
-        table_name: tableName,
-        include_indexes: false,
-      });
-
-      const structureText =
-        typeof structureResult === "string" ? structureResult : JSON.stringify(structureResult, null, 2);
-
-      const sqlPrompt = `Generate a SELECT for: "${userMessage}"
-
-Table: ${tableName}
-Structure (for column names):
-${structureText}
-
-Rules:
-- Use only real columns
-- LIMIT 50
-- Output ONLY SQL (no markdown, no prose)`;
-
-      const sqlResp = await model.invoke([new HumanMessage(sqlPrompt)]);
-      const sql = this.extractSQLFromResponse(String(sqlResp.content)) || String(sqlResp.content).trim();
-
-      if (!/^SELECT\s/i.test(sql)) throw new Error("No valid SELECT generated");
-
-      const execRes: any = await executeSql.invoke({
-        reasoning: `Execute query for: "${userMessage}"`,
-        sql_query: sql,
-        explain_plan: false,
-      });
-
-      const parsed = typeof execRes === "string" ? JSON.parse(execRes) : execRes;
-
-      if (parsed?.success && parsed.data) {
-        const summary = await this.generateSummary(userMessage, parsed.data);
-        return { success: true, data: parsed.data, sqlQuery: sql, summary };
-      }
-      return { success: false, error: parsed?.error || "Query execution failed", sqlQuery: sql };
-    } catch (err: any) {
-      return { success: false, error: `Database exploration failed: ${err.message}` };
-    }
-  }
-
-  private async executeWithLegacyMethod(userMessage: string): Promise<DatabaseQueryResult> {
-    const start = Date.now();
-    try {
-      const model = this.createModel();
-      const prompt = `${generateQueryPrompt(userMessage)}
+      // Fallback to legacy generation
+      throw new Error(result?.error || "Tool execution failed");
+    } catch {
+      // Legacy path
+      try {
+        const m = this.model(0.0);
+        const prompt = `${generateQueryPrompt(userMessage)}
 
 CONTEXT: "${userMessage}"
 REQUIREMENTS:
@@ -902,86 +667,67 @@ REQUIREMENTS:
 - LIMIT <= 100
 
 SQL:`;
+        const resp = await m.invoke([new SystemMessage(SYSTEM_PROMPTS.databaseExpert), new HumanMessage(prompt)]);
+        const sql = this.extractSQL(String(resp.content)) || String(resp.content).trim();
+        if (!/^SELECT\s/i.test(sql)) {
+          return { success: false, error: "Unable to generate valid SQL" };
+        }
+        const toolRaw: any = await executeSql.invoke({ sql_query: sql, explain_plan: this.withPerf });
+        const parsed = typeof toolRaw === "string" ? JSON.parse(toolRaw) : toolRaw;
 
-      const sqlResp = await model.invoke([new SystemMessage(SYSTEM_PROMPTS.databaseExpert), new HumanMessage(prompt)]);
-      const sql = this.extractSQLFromResponse(String(sqlResp.content)) || String(sqlResp.content).trim();
-      if (!/^SELECT\s/i.test(sql)) {
+        if (!parsed?.success || !parsed.data) return { success: false, sqlQuery: sql, error: parsed?.error || "No data returned" };
+
+        const data = parsed.data as any[];
+        const summary = await this.summarize(userMessage, data);
         return {
-          success: false,
-          error: "Unable to generate valid SQL",
-          performance: this.includePerformanceMetrics
-            ? { executionTime: Date.now() - start, rowCount: 0, queryComplexity: "low" }
+          success: true,
+          data,
+          sqlQuery: sql,
+          summary,
+          performance: this.withPerf
+            ? { executionTime: Date.now() - started, rowCount: data.length, queryComplexity: this.complexity(sql) }
             : undefined,
         };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: `Database query failed: ${err.message}`,
+          performance: this.withPerf ? { executionTime: Date.now() - started, rowCount: 0, queryComplexity: "medium" } : undefined,
+        };
       }
-
-      const toolResult: any = await executeSql.invoke({
-        reasoning: `Execute query for: ${userMessage}`,
-        sql_query: sql,
-        explain_plan: this.includePerformanceMetrics,
-      });
-
-      const parsed = typeof toolResult === "string" ? JSON.parse(toolResult) : toolResult;
-      if (!parsed?.success || !parsed.data) {
-        return { success: false, sqlQuery: sql, error: parsed?.error || "No data returned" };
-      }
-
-      const data = parsed.data as Record<string, any>[];
-      const summary = await this.generateSummary(userMessage, data);
-
-      return {
-        success: true,
-        data,
-        sqlQuery: sql,
-        summary,
-        performance: this.includePerformanceMetrics
-          ? {
-              executionTime: Date.now() - start,
-              rowCount: data.length,
-              queryComplexity: this.getQueryComplexity(sql),
-            }
-          : undefined,
-      };
-    } catch (err: any) {
-      return {
-        success: false,
-        error: `Database query failed: ${err.message}`,
-        performance: this.includePerformanceMetrics
-          ? { executionTime: Date.now() - start, rowCount: 0, queryComplexity: "medium" }
-          : undefined,
-      };
     }
   }
 }
 
-/* ------------------------------- Main Agent ------------------------------- */
-
+/* -----------------------------------------------------------------------------
+ * AIAgent (one path to build contexts & prompts; reused by all methods)
+ * -------------------------------------------------------------------------- */
 export class AIAgent {
-  private config: Required<AgentConfig>;
-  private memoryManager?: MemoryManager;
+  private cfg: Required<AgentConfig>;
+  private mm?: MemoryManager;
 
-  constructor(config: Partial<AgentConfig> = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+  constructor(cfg: Partial<AgentConfig> = {}) {
+    this.cfg = { ...DEFAULT_CONFIG, ...cfg };
   }
 
-  private async initializeMemory(): Promise<void> {
-    if (this.config.useMemory && !this.memoryManager) {
-      this.memoryManager = await MemoryManager.getInstance();
-    }
+  /* ---------- init & model ---------- */
+  private async initMemory() {
+    if (this.cfg.useMemory && !this.mm) this.mm = await MemoryManager.getInstance();
   }
 
-  private createModel(opts?: { forceStreaming?: boolean }): ChatOllama {
-    const modelConf = AVAILABLE_MODELS[this.config.modelKey];
+  private model(opts?: { forceStreaming?: boolean }) {
+    const m = AVAILABLE_MODELS[this.cfg.modelKey];
     return new ChatOllama({
       baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
-      model: this.config.modelKey,
-      temperature: this.config.temperature,
-      streaming: opts?.forceStreaming ?? this.config.streaming,
+      model: this.cfg.modelKey,
+      temperature: this.cfg.temperature,
+      streaming: opts?.forceStreaming ?? this.cfg.streaming,
       keepAlive: "10m",
-      numCtx: this.config.contextWindow,
+      numCtx: this.cfg.contextWindow,
     });
   }
 
+  /* ---------- auth ---------- */
   async authenticate(request: Request): Promise<{ user: any; rateLimitOk: boolean }> {
     const user = await currentUser();
     if (!user?.id) throw new Error("Authentication required");
@@ -990,22 +736,207 @@ export class AIAgent {
     return { user, rateLimitOk: success };
   }
 
-  private truncateContexts(contexts: any, maxLength: number): any {
-    const truncated = { ...contexts };
+  /* ---------- shared context builder ---------- */
+  private async buildContextsAndPrompt(opts: {
+    message: string;
+    userName?: string;
+    sessionId?: string;
+    additionalContext?: string;
+    documentMeta?: { id: string; title: string; description?: string };
+    enableDB: boolean;
+  }) {
+    const { message, userName, sessionId, additionalContext, documentMeta, enableDB } = opts;
+
+    const dbDetection = isDatabaseQuery(message);
+    const shouldQueryDB = this.cfg.useDatabase && enableDB && dbDetection.isDbQuery;
+
+    const ctxs: AgentResponse["contexts"] = {};
+    let rerankingApplied = false;
+    const allReranked: RerankingResult[] = [];
+
+    const tasks: Promise<void>[] = [];
+
+    if (shouldQueryDB) {
+      tasks.push(
+        (async () => {
+          try {
+            const exec = new DatabaseQueryExecutor(this.cfg.modelKey, false);
+            ctxs.database = await exec.executeQuery(message);
+          } catch (e) {
+            console.warn("DB query failed", e);
+          }
+        })()
+      );
+    }
+
+    if (this.cfg.useKnowledgeBase && this.mm) {
+      tasks.push(
+        (async () => {
+          try {
+            const search = await this.mm!.knowledgeBaseSearch(
+              message,
+              5,
+              {},
+              this.cfg.useReranking,
+              this.cfg.modelKey,
+              this.cfg.rerankingThreshold
+            );
+            ctxs.knowledge = search.documents.map((d) => d.pageContent).join("\n---\n").slice(0, 4000);
+            if (search.rerankingResults.length) {
+              allReranked.push(...search.rerankingResults);
+              rerankingApplied = true;
+            }
+          } catch (e) {
+            console.warn("KB search failed", e);
+          }
+        })()
+      );
+    }
+
+    // Conversation & Similar (general chat or document)
+    if (this.cfg.useMemory && this.mm) {
+      tasks.push(
+        (async () => {
+          try {
+            if (!documentMeta) {
+              // General chat
+              const gk: GeneralChatKey = { userId: userName || "user", modelName: this.cfg.modelKey, sessionId: sessionId || "default" };
+              ctxs.conversation = await this.mm!.readLatestGeneralChatHistory(gk);
+              const similar = await this.mm!.searchSimilarConversations(
+                message,
+                gk.userId,
+                3,
+                this.cfg.useReranking,
+                this.cfg.modelKey,
+                this.cfg.rerankingThreshold
+              );
+              ctxs.similar = similar.documents
+                ?.filter((d: any) => d.metadata?.chatSession !== gk.sessionId)
+                .map((d) => d.pageContent)
+                .join("\n---\n")
+                .slice(0, 1500);
+              if (similar.rerankingResults.length) {
+                allReranked.push(...similar.rerankingResults);
+                rerankingApplied = true;
+              }
+            } else {
+              // Document chat
+              const dk: DocumentKey = { documentName: documentMeta.id, userId: userName || "user", modelName: this.cfg.modelKey };
+              ctxs.conversation = await this.mm!.readLatestHistory(dk);
+
+              const rel = await this.mm!.vectorSearch(
+                message,
+                documentMeta.id,
+                false,
+                this.cfg.useReranking,
+                this.cfg.modelKey,
+                this.cfg.rerankingThreshold
+              );
+              ctxs.knowledge = rel.documents?.map((d) => d.pageContent).join("\n") || "";
+              if (rel.rerankingResults.length) {
+                allReranked.push(...rel.rerankingResults);
+                rerankingApplied = true;
+              }
+
+              const sim = await this.mm!.vectorSearch(
+                ctxs.conversation || "",
+                documentMeta.id,
+                true,
+                this.cfg.useReranking,
+                this.cfg.modelKey,
+                this.cfg.rerankingThreshold
+              );
+              const simText = sim.documents?.map((d) => d.pageContent).join("\n") || "";
+              ctxs.similar = simText;
+              if (sim.rerankingResults.length) {
+                allReranked.push(...sim.rerankingResults);
+                rerankingApplied = true;
+              }
+            }
+          } catch (e) {
+            console.warn("Memory ops failed", e);
+          }
+        })()
+      );
+    }
+
+    await Promise.all(tasks);
+
+    // Truncate contexts to fit
+    const truncated = this.truncateContexts(ctxs, this.cfg.maxContextLength);
+    if (allReranked.length) truncated.rerankedResults = allReranked;
+
+    // Build prompt
+    const header = documentMeta
+      ? `${SYSTEM_PROMPTS.documentChat}\nTitle: ${documentMeta.title}\nDescription: ${documentMeta.description || ""}\nUser: ${userName || "User"}\nReranking: ${rerankingApplied ? "Yes" : "No"}`
+      : `${SYSTEM_PROMPTS.chat}\nUser: ${userName || "User"}\nDetection: ${(dbDetection.confidence * 100).toFixed(1)}% db-related\nReranking: ${rerankingApplied ? "Yes" : "No"}`;
+
+    let systemPrompt = header;
+
+    if (!documentMeta) {
+      if (truncated.database?.success && truncated.database.data?.length) {
+        const sample = truncated.database.data.slice(0, 5);
+        const summarySafe = String(truncated.database.summary || "").slice(0, 1200);
+        systemPrompt += `
+
+LIVE DATABASE RESULTS:
+SQL: ${truncated.database.sqlQuery}
+Rows: ${truncated.database.data.length}
+Sample: ${JSON.stringify(sample, null, 2).slice(0, 1800)}
+Business Summary: ${summarySafe}
+
+Use these real numbers in the answer.`;
+      } else if (truncated.database?.error && shouldQueryDB) {
+        systemPrompt += `
+
+DATABASE QUERY ATTEMPTED:
+SQL: ${truncated.database.sqlQuery || "n/a"}
+Error: ${truncated.database.error}
+Give general guidance if possible.`;
+      }
+    }
+
+    if (truncated.knowledge) systemPrompt += `\n\nRELEVANT${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.knowledge}`;
+    if (truncated.similar) systemPrompt += `\n\nRELATED${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.similar}`;
+    if (truncated.conversation) systemPrompt += `\n\nHISTORY:\n${truncated.conversation}`;
+    if (additionalContext) systemPrompt += `\n\nADDITIONAL:\n${additionalContext}`;
+    if (!documentMeta && !truncated.database && shouldQueryDB) systemPrompt += `\n\nSCHEMA:\n${DATABASE_SCHEMA}`;
+    systemPrompt += `\n\nQuestion: ${message.trim()}`;
+
+    const sources = [
+      truncated.database ? "database" : null,
+      truncated.knowledge ? (documentMeta ? "document" : "knowledge") : null,
+      truncated.conversation ? "history" : null,
+      truncated.similar ? "similar" : null,
+    ].filter(Boolean) as string[];
+
+    return {
+      shouldQueryDB,
+      dbConfidence: dbDetection.confidence,
+      systemPrompt,
+      truncated,
+      rerankingApplied,
+      sources,
+      tokenCountEst: systemPrompt.length, // simple estimate
+    };
+  }
+
+  private truncateContexts(contexts: any, maxLength: number) {
+    const t = { ...contexts };
     let total = 0;
-    Object.values(contexts).forEach((c: any) => {
+    Object.values(t).forEach((c: any) => {
       if (typeof c === "string") total += c.length;
       else if (c?.summary) total += String(c.summary).length;
     });
-    if (total <= maxLength) return truncated;
+    if (total <= maxLength) return t;
 
     const priorities = ["database", "knowledge", "conversation", "similar"] as const;
     const target = Math.floor(maxLength * 0.9);
 
     for (const k of priorities) {
-      if (typeof truncated[k] === "string") {
-        const text = truncated[k] as string;
-        const allowance = Math.max(200, Math.floor(target * 0.3)); // cap per section
+      if (typeof t[k] === "string") {
+        const text = t[k] as string;
+        const allowance = Math.max(200, Math.floor(target * 0.3));
         if (text.length > allowance) {
           const sentences = text.split(/[.!?]+/);
           let acc = "";
@@ -1013,438 +944,123 @@ export class AIAgent {
             if ((acc + s + ".").length <= allowance) acc += s + ".";
             else break;
           }
-          truncated[k] = acc || text.slice(0, allowance);
+          t[k] = acc || text.slice(0, allowance);
         }
       }
     }
-    return truncated;
+    return t;
   }
 
-  async generateChatResponse(message: string, context: AgentContext, additionalContext?: string): Promise<AgentResponse> {
+  /* ---------- responses ---------- */
+  async generateChatResponse(message: string, ctx: AgentContext, additionalContext?: string): Promise<AgentResponse> {
     const start = Date.now();
-    await this.initializeMemory();
+    await this.initMemory();
 
-    const chatKey: GeneralChatKey = {
-      userId: context.userId,
-      modelName: this.config.modelKey,
-      sessionId: context.sessionId || uuidv4(),
-    };
+    const prep = await this.buildContextsAndPrompt({
+      message,
+      userName: ctx.userId,
+      sessionId: ctx.sessionId || uuidv4(),
+      additionalContext,
+      enableDB: true,
+    });
 
-    const dbDetection = isDatabaseQuery(message);
-    const shouldQueryDB = this.config.useDatabase && dbDetection.isDbQuery;
-
-    const contexts: AgentResponse["contexts"] = {};
-    let rerankingApplied = false;
-    const allReranked: RerankingResult[] = [];
-
-    const tasks: Promise<void>[] = [];
-
-    if (shouldQueryDB) {
-      tasks.push(
-        (async () => {
-          try {
-            const exec = new DatabaseQueryExecutor(this.config.modelKey, false);
-            contexts.database = await exec.executeQuery(message);
-          } catch (e) {
-            console.warn("DB query failed", e);
-          }
-        })()
-      );
-    }
-
-    if (this.config.useKnowledgeBase && this.memoryManager) {
-      tasks.push(
-        (async () => {
-          try {
-            const search = await this.memoryManager!.knowledgeBaseSearch(
-              message,
-              5,
-              {},
-              this.config.useReranking,
-              this.config.modelKey,
-              this.config.rerankingThreshold
-            );
-            contexts.knowledge = search.documents.map((d) => d.pageContent).join("\n---\n").slice(0, 4000);
-            if (search.rerankingResults.length) {
-              allReranked.push(...search.rerankingResults);
-              rerankingApplied = true;
-            }
-          } catch (e) {
-            console.warn("KB search failed", e);
-          }
-        })()
-      );
-    }
-
-    if (this.config.useMemory && this.memoryManager) {
-      tasks.push(
-        (async () => {
-          try {
-            contexts.conversation = await this.memoryManager!.readLatestGeneralChatHistory(chatKey);
-            const similar = await this.memoryManager!.searchSimilarConversations(
-              message,
-              context.userId,
-              3,
-              this.config.useReranking,
-              this.config.modelKey,
-              this.config.rerankingThreshold
-            );
-            contexts.similar = similar.documents
-              ?.filter((d: any) => d.metadata?.chatSession !== context.sessionId)
-              .map((d) => d.pageContent)
-              .join("\n---\n")
-              .slice(0, 1500);
-            if (similar.rerankingResults.length) {
-              allReranked.push(...similar.rerankingResults);
-              rerankingApplied = true;
-            }
-          } catch (e) {
-            console.warn("Memory ops failed", e);
-          }
-        })()
-      );
-    }
-
-    await Promise.all(tasks);
-
-    const truncated = this.truncateContexts(contexts, this.config.maxContextLength);
-
-    let systemPrompt =
-      `${SYSTEM_PROMPTS.chat}\n` +
-      `User: ${context.userName || "User"}\n` +
-      `Detection: ${(dbDetection.confidence * 100).toFixed(1)}% db-related\n` +
-      `Reranking: ${rerankingApplied ? "Yes" : "No"}`;
-
-    if (truncated.database?.success && truncated.database.data?.length) {
-      const sample = truncated.database.data.slice(0, 5);
-      const summarySafe = String(truncated.database.summary || "").slice(0, 1200);
-      systemPrompt += `
-
-LIVE DATABASE RESULTS:
-SQL: ${truncated.database.sqlQuery}
-Rows: ${truncated.database.data.length}
-Sample: ${JSON.stringify(sample, null, 2).slice(0, 1800)}
-Business Summary: ${summarySafe}
-
-Use these real numbers in the answer.`;
-    } else if (truncated.database?.error && shouldQueryDB) {
-      systemPrompt += `
-
-DATABASE QUERY ATTEMPTED:
-SQL: ${truncated.database.sqlQuery || "n/a"}
-Error: ${truncated.database.error}
-Give general guidance if possible.`;
-    }
-
-    if (truncated.knowledge) systemPrompt += `\n\nKNOWLEDGE${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.knowledge}`;
-    if (truncated.conversation) systemPrompt += `\n\nHISTORY:\n${truncated.conversation}`;
-    if (truncated.similar) systemPrompt += `\n\nRELATED${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.similar}`;
-    if (additionalContext) systemPrompt += `\n\nADDITIONAL:\n${additionalContext}`;
-    if (!truncated.database && shouldQueryDB) systemPrompt += `\n\nSCHEMA:\n${DATABASE_SCHEMA}`;
-
-    systemPrompt += `\n\nQuestion: ${message.trim()}`;
-
-    const model = this.createModel();
-    const resp = await model.invoke([new SystemMessage(systemPrompt), new HumanMessage(message)]);
+    const resp = await this.model().invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
     const content = String(resp.content || "");
 
-    if (this.config.useMemory && this.memoryManager) {
-      try {
-        await this.memoryManager.writeToGeneralChatHistory(`User: ${message}\n`, chatKey);
-        let save = `Assistant: ${content}`;
-        if (truncated.database?.success && truncated.database.sqlQuery) save += `\n[Query: ${truncated.database.sqlQuery}]`;
-        await this.memoryManager.writeToGeneralChatHistory(save, chatKey);
-      } catch (e) {
-        console.warn("save to memory failed", e);
-      }
+    if (this.cfg.useMemory && this.mm) {
+      const gk: GeneralChatKey = { userId: ctx.userId, modelName: this.cfg.modelKey, sessionId: ctx.sessionId };
+      await this.mm.writeToGeneralChatHistory(`User: ${message}\n`, gk);
+      let save = `Assistant: ${content}`;
+      if (prep.truncated.database?.success && prep.truncated.database.sqlQuery) save += `\n[Query: ${prep.truncated.database.sqlQuery}]`;
+      await this.mm.writeToGeneralChatHistory(save, gk);
     }
-
-    const sources = [
-      truncated.database ? "database" : null,
-      truncated.knowledge ? "knowledge" : null,
-      truncated.conversation ? "history" : null,
-      truncated.similar ? "similar" : null,
-    ].filter(Boolean) as string[];
-
-    if (allReranked.length) truncated.rerankedResults = allReranked;
-
-    const totalTokens = systemPrompt.length + content.length;
 
     return {
       content,
-      model: this.config.modelKey,
-      executionTime: Date.now() - startTime,
-      contexts: truncated,
+      model: this.cfg.modelKey,
+      executionTime: Date.now() - start,
+      contexts: prep.truncated,
       metadata: {
-        sessionId: context.sessionId || chatKey.sessionId!,
-        dbQueryDetected: shouldQueryDB,
-        dbQueryConfidence: dbDetection.confidence,
-        contextSources: sources,
-        rerankingApplied,
-        totalContextTokens: totalTokens,
+        sessionId: ctx.sessionId || "",
+        dbQueryDetected: prep.shouldQueryDB,
+        dbQueryConfidence: prep.dbConfidence,
+        contextSources: prep.sources,
+        rerankingApplied: prep.rerankingApplied,
+        totalContextTokens: prep.tokenCountEst + content.length,
       },
     };
   }
 
-  async generateDocumentResponse(message: string, context: AgentContext, documentContext?: string): Promise<AgentResponse> {
+  async generateDocumentResponse(message: string, ctx: AgentContext, documentContext?: string): Promise<AgentResponse> {
     const start = Date.now();
-    await this.initializeMemory();
-    if (!context.documentId) throw new Error("Document ID required");
+    await this.initMemory();
+    if (!ctx.documentId) throw new Error("Document ID required");
 
-    const document = await prismadb.document.findUnique({
-      where: { id: context.documentId },
-      include: { messages: true },
+    const doc = await prismadb.document.findUnique({ where: { id: ctx.documentId }, include: { messages: true } });
+    if (!doc) throw new Error("Document not found");
+
+    const prep = await this.buildContextsAndPrompt({
+      message,
+      userName: ctx.userId,
+      sessionId: ctx.sessionId,
+      additionalContext: documentContext,
+      documentMeta: { id: doc.id, title: doc.title, description: doc.description || "" },
+      enableDB: false,
     });
-    if (!document) throw new Error("Document not found");
 
-    const documentKey: DocumentKey = {
-      documentName: document.id,
-      userId: context.userId,
-      modelName: this.config.modelKey,
-    };
-
-    const contexts: AgentResponse["contexts"] = {};
-    let rerankingApplied = false;
-    const allReranked: RerankingResult[] = [];
-
-    if (this.config.useMemory && this.memoryManager) {
-      try {
-        contexts.conversation = await this.memoryManager.readLatestHistory(documentKey);
-
-        const similar = await this.memoryManager.vectorSearch(
-          contexts.conversation || "",
-          document.id,
-          true,
-          this.config.useReranking,
-          this.config.modelKey,
-          this.config.rerankingThreshold
-        );
-        contexts.similar = similar.documents?.map((d) => d.pageContent).join("\n") || "";
-        if (similar.rerankingResults.length) {
-          allReranked.push(...similar.rerankingResults);
-          rerankingApplied = true;
-        }
-
-        const relevant = await this.memoryManager.vectorSearch(
-          message,
-          document.id,
-          false,
-          this.config.useReranking,
-          this.config.modelKey,
-          this.config.rerankingThreshold
-        );
-        contexts.knowledge = relevant.documents?.map((d) => d.pageContent).join("\n") || "";
-        if (relevant.rerankingResults.length) {
-          allReranked.push(...relevant.rerankingResults);
-          rerankingApplied = true;
-        }
-      } catch (e) {
-        console.warn("doc memory ops failed", e);
-      }
-    }
-
-    const truncated = this.truncateContexts(contexts, this.config.maxContextLength);
-
-    let systemPrompt =
-      `${SYSTEM_PROMPTS.documentChat}\n` +
-      `Title: ${document.title}\n` +
-      `Description: ${document.description}\n` +
-      `User: ${context.userName || "User"}\n` +
-      `Reranking: ${rerankingApplied ? "Yes" : "No"}`;
-
-    if (truncated.knowledge) systemPrompt += `\n\nRELEVANT${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.knowledge}`;
-    if (truncated.similar) systemPrompt += `\n\nRELATED${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.similar}`;
-    if (truncated.conversation) systemPrompt += `\n\nHISTORY:\n${truncated.conversation}`;
-    if (documentContext) systemPrompt += `\n\nADDITIONAL:\n${documentContext}`;
-    systemPrompt += `\n\nQuestion: ${message.trim()}`;
-
-    const model = this.createModel();
-    const resp = await model.invoke([new SystemMessage(systemPrompt), new HumanMessage(message)]);
+    const resp = await this.model().invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
     const content = String(resp.content || "");
 
-    if (this.config.useMemory && this.memoryManager) {
-      try {
-        await this.memoryManager.writeToHistory(`User: ${message}\n`, documentKey);
-        await this.memoryManager.writeToHistory(`System: ${content}`, documentKey);
-      } catch (e) {
-        console.warn("save doc memory failed", e);
-      }
+    if (this.cfg.useMemory && this.mm) {
+      const dk: DocumentKey = { documentName: doc.id, userId: ctx.userId, modelName: this.cfg.modelKey };
+      await this.mm.writeToHistory(`User: ${message}\n`, dk);
+      await this.mm.writeToHistory(`System: ${content}`, dk);
     }
 
     try {
       await prismadb.document.update({
-        where: { id: context.documentId },
-        data: {
-          messages: {
-            createMany: {
-              data: [
-                { content: message, role: "USER", userId: context.userId },
-                { content, role: "SYSTEM", userId: context.userId },
-              ],
-            },
-          },
-        },
+        where: { id: ctx.documentId },
+        data: { messages: { createMany: { data: [{ content: message, role: "USER", userId: ctx.userId }, { content, role: "SYSTEM", userId: ctx.userId }] } } },
       });
     } catch (e) {
       console.warn("save messages to db failed", e);
     }
 
-    const sources = [
-      truncated.knowledge ? "document" : null,
-      truncated.conversation ? "history" : null,
-      truncated.similar ? "similar" : null,
-    ].filter(Boolean) as string[];
-
-    if (allReranked.length) truncated.rerankedResults = allReranked;
-
-    const totalTokens = systemPrompt.length + content.length;
-
     return {
       content,
-      model: this.config.modelKey,
+      model: this.cfg.modelKey,
       executionTime: Date.now() - start,
-      contexts: truncated,
+      contexts: prep.truncated,
       metadata: {
-        sessionId: context.sessionId || context.documentId,
+        sessionId: ctx.sessionId || ctx.documentId,
         dbQueryDetected: false,
         dbQueryConfidence: 0,
-        contextSources: sources,
-        rerankingApplied,
-        totalContextTokens: totalTokens,
+        contextSources: prep.sources,
+        rerankingApplied: prep.rerankingApplied,
+        totalContextTokens: prep.tokenCountEst + content.length,
       },
     };
   }
 
-  async generateStreamingResponse(message: string, context: AgentContext, additionalContext?: string): Promise<ReadableStream> {
-    await this.initializeMemory();
+  async generateStreamingResponse(message: string, ctx: AgentContext, additionalContext?: string): Promise<ReadableStream> {
+    await this.initMemory();
 
-    const chatKey: GeneralChatKey = {
-      userId: context.userId,
-      modelName: this.config.modelKey,
-      sessionId: context.sessionId || uuidv4(),
-    };
+    const prep = await this.buildContextsAndPrompt({
+      message,
+      userName: ctx.userId,
+      sessionId: ctx.sessionId || uuidv4(),
+      additionalContext,
+      enableDB: true,
+    });
 
-    const dbDetection = isDatabaseQuery(message);
-    const shouldQueryDB = this.config.useDatabase && dbDetection.isDbQuery;
+    const model = this.model({ forceStreaming: true });
+    const stream = await model.stream([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
 
-    const contexts: AgentResponse["contexts"] = {};
-    let rerankingApplied = false;
-    const allReranked: RerankingResult[] = [];
+    const mm = this.mm;
+    const cfg = this.cfg;
+    const gk: GeneralChatKey = { userId: ctx.userId, modelName: this.cfg.modelKey, sessionId: ctx.sessionId };
 
-    const tasks: Promise<void>[] = [];
-
-    if (shouldQueryDB) {
-      tasks.push(
-        (async () => {
-          try {
-            const exec = new DatabaseQueryExecutor(this.config.modelKey, false);
-            contexts.database = await exec.executeQuery(message);
-          } catch (e) {
-            console.warn("DB query failed", e);
-          }
-        })()
-      );
-    }
-
-    if (this.config.useKnowledgeBase && this.memoryManager) {
-      tasks.push(
-        (async () => {
-          try {
-            const search = await this.memoryManager!.knowledgeBaseSearch(
-              message,
-              5,
-              {},
-              this.config.useReranking,
-              this.config.modelKey,
-              this.config.rerankingThreshold
-            );
-            contexts.knowledge = search.documents.map((d) => d.pageContent).join("\n---\n").slice(0, 4000);
-            if (search.rerankingResults.length) {
-              allReranked.push(...search.rerankingResults);
-              rerankingApplied = true;
-            }
-          } catch (e) {
-            console.warn("KB search failed", e);
-          }
-        })()
-      );
-    }
-
-    if (this.config.useMemory && this.memoryManager) {
-      tasks.push(
-        (async () => {
-          try {
-            await this.memoryManager!.writeToGeneralChatHistory(`User: ${message}\n`, chatKey);
-            contexts.conversation = await this.memoryManager!.readLatestGeneralChatHistory(chatKey);
-
-            const similar = await this.memoryManager!.searchSimilarConversations(
-              message,
-              context.userId,
-              3,
-              this.config.useReranking,
-              this.config.modelKey,
-              this.config.rerankingThreshold
-            );
-            contexts.similar = similar.documents
-              ?.filter((d: any) => d.metadata?.chatSession !== context.sessionId)
-              .map((d) => d.pageContent)
-              .join("\n---\n")
-              .slice(0, 1500);
-            if (similar.rerankingResults.length) {
-              allReranked.push(...similar.rerankingResults);
-              rerankingApplied = true;
-            }
-          } catch (e) {
-            console.warn("Memory ops failed", e);
-          }
-        })()
-      );
-    }
-
-    await Promise.all(tasks);
-
-    const truncated = this.truncateContexts(contexts, this.config.maxContextLength);
-
-    let systemPrompt =
-      `${SYSTEM_PROMPTS.chat}\n` +
-      `User: ${context.userName || "User"}\n` +
-      `Detection: ${(dbDetection.confidence * 100).toFixed(1)}% db-related\n` +
-      `Reranking: ${rerankingApplied ? "Yes" : "No"}`;
-
-    if (truncated.database?.success && truncated.database.data?.length) {
-      const sample = truncated.database.data.slice(0, 5);
-      const summarySafe = String(truncated.database.summary || "").slice(0, 1200);
-      systemPrompt += `
-
-LIVE DATABASE RESULTS:
-SQL: ${truncated.database.sqlQuery}
-Rows: ${truncated.database.data.length}
-Sample: ${JSON.stringify(sample, null, 2).slice(0, 1800)}
-Business Summary: ${summarySafe}
-
-Use these real numbers in the answer.`;
-    } else if (truncated.database?.error && shouldQueryDB) {
-      systemPrompt += `
-
-DATABASE QUERY ATTEMPTED:
-SQL: ${truncated.database.sqlQuery || "n/a"}
-Error: ${truncated.database.error}
-Give general guidance if possible.`;
-    }
-
-    if (truncated.knowledge) systemPrompt += `\n\nKNOWLEDGE${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.knowledge}`;
-    if (truncated.conversation) systemPrompt += `\n\nHISTORY:\n${truncated.conversation}`;
-    if (truncated.similar) systemPrompt += `\n\nRELATED${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.similar}`;
-    if (additionalContext) systemPrompt += `\n\nADDITIONAL:\n${additionalContext}`;
-    if (!truncated.database && shouldQueryDB) systemPrompt += `\n\nSCHEMA:\n${DATABASE_SCHEMA}`;
-    systemPrompt += `\n\nQuestion: ${message.trim()}`;
-
-    // force streaming on
-    const model = this.createModel({ forceStreaming: true });
-    const stream = await model.stream([new SystemMessage(systemPrompt), new HumanMessage(message)]);
-
-    const memoryManager = this.memoryManager;
-    const config = this.config;
+    if (cfg.useMemory && mm) await mm.writeToGeneralChatHistory(`User: ${message}\n`, gk);
 
     return new ReadableStream({
       async start(controller) {
@@ -1464,158 +1080,119 @@ Give general guidance if possible.`;
           buffer = msg;
         } finally {
           controller.close();
-          if (buffer.trim() && config.useMemory && memoryManager) {
-            try {
-              let toSave = `Assistant: ${buffer.trim()}`;
-              if (truncated.database?.success && truncated.database.sqlQuery) toSave += `\n[Query: ${truncated.database.sqlQuery}]`;
-              if (rerankingApplied) toSave += `\n[Reranking applied: ${allReranked.length}]`;
-              await memoryManager.writeToGeneralChatHistory(toSave, chatKey);
-            } catch (e) {
-              console.warn("save streaming response failed", e);
-            }
+          if (buffer.trim() && cfg.useMemory && mm) {
+            let toSave = `Assistant: ${buffer.trim()}`;
+            if (prep.truncated.database?.success && prep.truncated.database.sqlQuery) toSave += `\n[Query: ${prep.truncated.database.sqlQuery}]`;
+            if (prep.rerankingApplied) toSave += `\n[Reranking applied: ${(prep.truncated.rerankedResults || []).length}]`;
+            await mm.writeToGeneralChatHistory(toSave, gk);
           }
         }
       },
     });
   }
 
+  /* ---------- misc ---------- */
   async executeQuery(query: string): Promise<DatabaseQueryResult> {
-    const exec = new DatabaseQueryExecutor(this.config.modelKey, true);
+    const exec = new DatabaseQueryExecutor(this.cfg.modelKey, true);
     return exec.executeQuery(query);
   }
 
   getModelInfo() {
-    const conf = AVAILABLE_MODELS[this.config.modelKey];
+    const conf = AVAILABLE_MODELS[this.cfg.modelKey];
     return {
-      id: this.config.modelKey,
+      id: this.cfg.modelKey,
       name: conf.name,
-      temperature: this.config.temperature,
-      contextWindow: this.config.contextWindow,
+      temperature: this.cfg.temperature,
+      contextWindow: this.cfg.contextWindow,
       capabilities: {
-        streaming: this.config.streaming,
-        memory: this.config.useMemory,
-        database: this.config.useDatabase,
-        knowledgeBase: this.config.useKnowledgeBase,
-        reranking: this.config.useReranking,
+        streaming: this.cfg.streaming,
+        memory: this.cfg.useMemory,
+        database: this.cfg.useDatabase,
+        knowledgeBase: this.cfg.useKnowledgeBase,
+        reranking: this.cfg.useReranking,
       },
       reranking: {
-        enabled: this.config.useReranking,
-        threshold: this.config.rerankingThreshold,
-        maxContextLength: this.config.maxContextLength,
+        enabled: this.cfg.useReranking,
+        threshold: this.cfg.rerankingThreshold,
+        maxContextLength: this.cfg.maxContextLength,
       },
     };
   }
 
   async performReranking(query: string, contexts: any[], threshold?: number): Promise<RerankingResult[]> {
-    if (!this.memoryManager) await this.initializeMemory();
-    const docs = contexts.map((c) =>
-      new Document({
-        pageContent: typeof c === "string" ? c : c.pageContent || JSON.stringify(c),
-        metadata: typeof c === "object" ? c.metadata || {} : {},
-      })
+    if (!this.mm) await this.initMemory();
+    const docs = contexts.map(
+      (c) =>
+        new Document({
+          pageContent: typeof c === "string" ? c : c.pageContent || JSON.stringify(c),
+          metadata: typeof c === "object" ? c.metadata || {} : {},
+        })
     );
-    return this.memoryManager!.rerankDocuments(query, docs, this.config.modelKey, threshold ?? this.config.rerankingThreshold);
+    return this.mm!.rerankDocuments(query, docs, this.cfg.modelKey, threshold ?? this.cfg.rerankingThreshold);
   }
 }
 
-/* --------------------------- Factories and helpers --------------------------- */
-
+/* -----------------------------------------------------------------------------
+ * Factories & helpers (same names, slimmer bodies)
+ * -------------------------------------------------------------------------- */
 export const createChatAgent = (config?: Partial<AgentConfig>) =>
-  new AIAgent({
-    useMemory: true,
-    useKnowledgeBase: true,
-    useDatabase: true,
-    useReranking: true,
-    ...config,
-  });
+  new AIAgent({ useMemory: true, useKnowledgeBase: true, useDatabase: true, useReranking: true, ...config });
 
 export const createDocumentAgent = (config?: Partial<AgentConfig>) =>
-  new AIAgent({
-    useMemory: true,
-    useDatabase: false,
-    useKnowledgeBase: false,
-    useReranking: true,
-    ...config,
-  });
+  new AIAgent({ useMemory: true, useDatabase: false, useKnowledgeBase: false, useReranking: true, ...config });
 
 export const createDatabaseAgent = (config?: Partial<AgentConfig>) =>
-  new AIAgent({
-    useMemory: false,
-    useDatabase: true,
-    useKnowledgeBase: false,
-    useReranking: false,
-    temperature: 0.0,
-    modelKey: "deepseek-r1:7b",
-    ...config,
-  });
+  new AIAgent({ useMemory: false, useDatabase: true, useKnowledgeBase: false, useReranking: false, temperature: 0.0, modelKey: "deepseek-r1:7b", ...config });
 
 export class ModernEmbeddingIntegration {
-  private memoryManager: MemoryManager;
-  constructor(embeddingConfig?: Partial<EmbeddingConfig>) {
-    this.memoryManager = new MemoryManager(embeddingConfig);
+  private mm: MemoryManager;
+  constructor(cfg?: Partial<EmbeddingConfig>) {
+    this.mm = new MemoryManager(cfg);
   }
-  async processFile(fileUrl: string, documentId: string, options: any = {}) {
-    return this.memoryManager.processFile(fileUrl, documentId, options);
+  processFile(fileUrl: string, documentId: string, options: any = {}) {
+    return this.mm.processFile(fileUrl, documentId, options);
   }
   getEmbeddingInfo() {
-    return this.memoryManager.getEmbeddingInfo();
+    return this.mm.getEmbeddingInfo();
   }
-  async healthCheck() {
-    return this.memoryManager.healthCheck();
+  healthCheck() {
+    return this.mm.healthCheck();
   }
-  async ensureModelsAvailable() {
-    return this.memoryManager.ensureEmbeddingModelsAvailable();
+  ensureModelsAvailable() {
+    return this.mm.ensureEmbeddingModelsAvailable();
   }
 }
 
-export async function loadFile(fileUrl: string, documentId: string, config?: Partial<EmbeddingConfig>): Promise<string[]> {
-  const integration = new ModernEmbeddingIntegration(config);
-  return integration.processFile(fileUrl, documentId);
+export async function loadFile(fileUrl: string, documentId: string, cfg?: Partial<EmbeddingConfig>) {
+  const integ = new ModernEmbeddingIntegration(cfg);
+  return integ.processFile(fileUrl, documentId);
 }
 
-export async function handleAuthAndRateLimit(request: Request): Promise<{
-  user: any;
-  success: boolean;
-  error?: NextResponse;
-}> {
+/* -----------------------------------------------------------------------------
+ * Auth / errors / headers (unchanged API, cleaner internals)
+ * -------------------------------------------------------------------------- */
+export async function handleAuthAndRateLimit(request: Request): Promise<{ user: any; success: boolean; error?: NextResponse }> {
   try {
     const user = await currentUser();
     if (!user?.id) {
-      return {
-        user: null,
-        success: false,
-        error: new NextResponse("Unauthorized. User ID not found.", { status: 401 }),
-      };
+      return { user: null, success: false, error: new NextResponse("Unauthorized. User ID not found.", { status: 401 }) };
     }
-
     const identifier = `${request.url}-${user.id}`;
     const { success } = await rateLimit(identifier);
-
-    if (!success) {
-      return {
-        user,
-        success: false,
-        error: new NextResponse("Rate limit exceeded", { status: 429 }),
-      };
-    }
+    if (!success) return { user, success: false, error: new NextResponse("Rate limit exceeded", { status: 429 }) };
     return { user, success: true };
   } catch (err: any) {
     console.error("Auth/RateLimit failed:", err.message, err.stack);
-    return {
-      user: null,
-      success: false,
-      error: new NextResponse(`Authentication error: ${err.message}`, { status: 500 }),
-    };
+    return { user: null, success: false, error: new NextResponse(`Authentication error: ${err.message}`, { status: 500 }) };
   }
 }
 
 export function createErrorResponse(error: any, status = 500): NextResponse {
-  const errorMessage = process.env.NODE_ENV === "development" ? error.message || "Internal error" : "An error occurred";
-  return NextResponse.json({ error: errorMessage, timestamp: new Date().toISOString() }, { status });
+  const msg = process.env.NODE_ENV === "development" ? error.message || "Internal error" : "An error occurred";
+  return NextResponse.json({ error: msg, timestamp: new Date().toISOString() }, { status });
 }
 
 export function setAgentResponseHeaders(response: any, agentResponse: AgentResponse): void {
-  // keep headers minimal in production to avoid leaks
   const dev = process.env.NODE_ENV === "development";
   response.headers.set("X-Session-ID", agentResponse.metadata.sessionId);
   response.headers.set("X-Model-Used", agentResponse.model);
@@ -1640,14 +1217,15 @@ export function setAgentResponseHeaders(response: any, agentResponse: AgentRespo
   }
 }
 
-/* ------------------------------- Validators ------------------------------- */
-
+/* -----------------------------------------------------------------------------
+ * Validators (same API)
+ * -------------------------------------------------------------------------- */
 export const validateChatRequest = (body: any) => {
   const errors: string[] = [];
   let userMessage = "";
-  if (Array.isArray(body.messages) && body.messages.length > 0) {
-    const lastUser = [...body.messages].reverse().find((m: any) => m.role === "user");
-    if (lastUser?.content) userMessage = lastUser.content;
+  if (Array.isArray(body.messages) && body.messages.length) {
+    const last = [...body.messages].reverse().find((m: any) => m.role === "user");
+    if (last?.content) userMessage = last.content;
   } else if (body.prompt) {
     userMessage = body.prompt;
   }
@@ -1679,20 +1257,12 @@ export const validateDocumentChatRequest = (body: any) => {
   const errors: string[] = [];
   if (!body.prompt?.trim()) errors.push("Prompt is required");
   if (body.prompt?.length > 5000) errors.push("Prompt too long (max 5,000 characters)");
-
   if (body.useReranking !== undefined && typeof body.useReranking !== "boolean") errors.push("useReranking must be a boolean");
-
   if (body.rerankingThreshold !== undefined) {
     const t = Number(body.rerankingThreshold);
     if (Number.isNaN(t) || t < 0 || t > 1) errors.push("rerankingThreshold must be 0..1");
   }
-
-  return {
-    prompt: body.prompt?.trim(),
-    useReranking: body.useReranking,
-    rerankingThreshold: body.rerankingThreshold,
-    errors,
-  };
+  return { prompt: body.prompt?.trim(), useReranking: body.useReranking, rerankingThreshold: body.rerankingThreshold, errors };
 };
 
 export const validateDatabaseRequest = (body: any) => {
@@ -1709,30 +1279,26 @@ export const validateDatabaseRequest = (body: any) => {
   };
 };
 
-/* --------------------- Reranking analytics (minor fix) --------------------- */
-
+/* -----------------------------------------------------------------------------
+ * Reranking analytics (optional – preserved API; simplified)
+ * -------------------------------------------------------------------------- */
 class RerankingAnalytics {
   private static instance: RerankingAnalytics;
   private redis: Redis;
   private constructor() {
     this.redis = Redis.fromEnv();
   }
-  public static getInstance() {
+  static getInstance() {
     if (!RerankingAnalytics.instance) RerankingAnalytics.instance = new RerankingAnalytics();
     return RerankingAnalytics.instance;
   }
-
   private improvementRatio(results: RerankingResult[]): number {
     if (results.length < 2) return 0;
-    const originalOrder = [...results].sort((a, b) => a.originalRank - b.originalRank);
-    const rerankedOrder = [...results].sort((a, b) => a.newRank - b.newRank);
+    const rerankedTop = [...results].sort((a, b) => a.newRank - b.newRank).slice(0, Math.min(3, results.length));
     let improvements = 0;
-    for (let i = 0; i < Math.min(3, results.length); i++) {
-      if (rerankedOrder[i].originalRank > i) improvements += rerankedOrder[i].originalRank - i;
-    }
+    for (let i = 0; i < rerankedTop.length; i++) improvements += Math.max(0, rerankedTop[i].originalRank - i);
     return improvements / Math.min(3, results.length);
   }
-
   async record(userId: string, query: string, results: RerankingResult[], executionTime: number) {
     try {
       const event = {
@@ -1745,8 +1311,7 @@ class RerankingAnalytics {
         topRelevanceScore: Math.max(...results.map((r) => r.relevanceScore)),
         improvementRatio: this.improvementRatio(results),
       };
-      const key = `reranking_events:${userId}:${Date.now()}`;
-      await this.redis.setex(key, 60 * 60 * 24 * 7, JSON.stringify(event));
+      await this.redis.setex(`reranking_events:${userId}:${Date.now()}`, 60 * 60 * 24 * 7, JSON.stringify(event));
 
       const statsKey = `reranking_stats:${userId}`;
       const existing = await this.redis.get(statsKey);
@@ -1765,11 +1330,9 @@ class RerankingAnalytics {
       console.warn("Failed to record reranking analytics", e);
     }
   }
-
   async getUserStats(userId: string) {
     try {
-      const statsKey = `reranking_stats:${userId}`;
-      const s = await this.redis.get(statsKey);
+      const s = await this.redis.get(`reranking_stats:${userId}`);
       return s ? JSON.parse(s as string) : null;
     } catch (e) {
       console.warn("Failed to get reranking stats", e);
@@ -1778,18 +1341,15 @@ class RerankingAnalytics {
   }
 }
 
-/* ----------------------------- Initialization ----------------------------- */
-
+/* -----------------------------------------------------------------------------
+ * Initialization (same API)
+ * -------------------------------------------------------------------------- */
 export async function initializeAgent(config: {
   agentConfig?: Partial<AgentConfig>;
   embeddingConfig?: Partial<EmbeddingConfig>;
   ensureModels?: boolean;
   healthCheck?: boolean;
-} = {}): Promise<{
-  agent: AIAgent;
-  embeddingIntegration: ModernEmbeddingIntegration;
-  healthStatus: { ollama: boolean; embedding: boolean; models: boolean };
-}> {
+} = {}) {
   const { agentConfig = {}, embeddingConfig = {}, ensureModels = true, healthCheck = true } = config;
 
   const agent = createChatAgent(agentConfig);
@@ -1815,4 +1375,4 @@ export async function initializeAgent(config: {
 export default AIAgent;
 
 // Re-exports (unchanged)
-export { DATABASE_SCHEMA, AVAILABLE_MODELS, isDatabaseQuery, DEFAULT_EMBEDDING_CONFIG, MemoryManager};
+export { DATABASE_SCHEMA, AVAILABLE_MODELS, isDatabaseQuery, MemoryManager };

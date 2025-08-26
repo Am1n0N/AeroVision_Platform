@@ -46,7 +46,7 @@ const ChatPage = () => {
   }, []); // Empty dependency array - run only once
 
   return (
-    <div className="h-screen bg-gray-50">
+    <div className="bg-gray-50">
       <ChatInterface
         chat={chat}
         settings={settings}

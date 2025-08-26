@@ -1,11 +1,10 @@
-// app/api/chat/route.ts - Updated with session creation support
+// app/api/chat/route.ts - Updated to keep session/model stable for memory continuity
 import dotenv from "dotenv";
 import { StreamingTextResponse } from "ai";
 import { NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
 import prismadb from "@/lib/prismadb";
 import { type ModelKey } from "@/config/models";
-// Import the centralized AI Agent and improved rate limiting
 import {
   createChatAgent,
   createErrorResponse,
@@ -13,7 +12,6 @@ import {
   AVAILABLE_MODELS,
   type AgentConfig,
 } from "@/lib/agent";
-
 import { handleAuthAndRateLimit } from "@/lib/rate-limit";
 
 dotenv.config({ path: `.env` });
@@ -21,33 +19,28 @@ dotenv.config({ path: `.env` });
 // Main POST Handler
 export async function POST(request: Request) {
   try {
-    // 1. Authentication and rate limiting
-    console.log("Starting authentication and rate limit check...");
-    const authResult = await handleAuthAndRateLimit(request, 'send_message');
-    if (!authResult.success) {
-      console.error("Auth or rate limit failed:", authResult.error);
-      return authResult.error;
-    }
+    // 1) Auth + rate limit
+    const authResult = await handleAuthAndRateLimit(request, "send_message");
+    if (!authResult.success) return authResult.error;
     const { user } = authResult;
 
-    // 2. Parse request body
+    // 2) Parse body
     const body = await request.json();
 
-    // 3. Check if this is a session creation request
-    if (body.action === 'create') {
+    // 3) Session creation
+    if (body.action === "create") {
       return await handleSessionCreation(body, user);
     }
 
-    // 4. Handle regular chat message (existing logic)
+    // 4) Regular chat
     return await handleChatMessage(body, user);
-
   } catch (error: any) {
     console.error("Error in POST handler:", error);
     return createErrorResponse(error);
   }
 }
 
-// New function to handle session creation
+/* ---------------------- Session creation (unchanged) ---------------------- */
 async function handleSessionCreation(body: any, user: any) {
   try {
     const {
@@ -58,15 +51,11 @@ async function handleSessionCreation(body: any, user: any) {
       temperature,
     } = body;
 
-    // Validate model
-    const validModelKey: ModelKey = modelKey in AVAILABLE_MODELS
-      ? modelKey as ModelKey
-      : "deepseek-r1:7b";
+    const validModelKey: ModelKey =
+      modelKey in AVAILABLE_MODELS ? (modelKey as ModelKey) : "deepseek-r1:7b";
 
-    // Generate title if not provided
     const sessionTitle = title || `New Chat ${new Date().toLocaleString()}`;
 
-    // Create new session
     const newSession = await prismadb.chatSession.create({
       data: {
         id: uuidv4(),
@@ -83,7 +72,6 @@ async function handleSessionCreation(body: any, user: any) {
       },
     });
 
-    // Return the new session with the expected format
     const sessionResponse = {
       id: newSession.id,
       title: newSession.title,
@@ -102,18 +90,16 @@ async function handleSessionCreation(body: any, user: any) {
       session: sessionResponse,
       message: "Session created successfully",
     });
-
   } catch (error: any) {
     console.error("Error creating session:", error);
     return createErrorResponse(error);
   }
 }
 
-// Existing chat message handling logic (extracted to separate function)
+/* -------------------------- Chat message handler -------------------------- */
 async function handleChatMessage(body: any, user: any) {
-  // 2. Parse and validate request
+  // 1) Validate payload
   const { userMessage, errors } = validateChatRequest(body);
-
   if (errors.length > 0) {
     return NextResponse.json(
       { error: "Invalid request format", details: errors },
@@ -121,7 +107,7 @@ async function handleChatMessage(body: any, user: any) {
     );
   }
 
-  // 3. Extract request parameters
+  // 2) Extract params from body
   const {
     sessionId,
     model: selectedModel,
@@ -130,23 +116,15 @@ async function handleChatMessage(body: any, user: any) {
     temperature,
   } = body;
 
-  const modelKey: ModelKey = selectedModel && selectedModel in AVAILABLE_MODELS
-    ? (selectedModel as ModelKey)
-    : "deepseek-r1:7b";
-
-  // 4. Handle session management
-  let chatSession;
+  // 3) Load or create chatSession (use default if no sessionId)
+  let chatSession: any;
   let isNewSession = false;
+  const defaultSessionId = `default-${user.id}`;
 
   if (sessionId) {
-    // Find existing session
     chatSession = await prismadb.chatSession.findFirst({
-      where: {
-        id: sessionId,
-        userId: user.id,
-      },
+      where: { id: sessionId, userId: user.id },
     });
-
     if (!chatSession) {
       return NextResponse.json(
         { error: "Session not found or unauthorized" },
@@ -154,26 +132,51 @@ async function handleChatMessage(body: any, user: any) {
       );
     }
   } else {
-    // Create new session
-    isNewSession = true;
-    const sessionTitle = generateSessionTitle(userMessage);
-
-    chatSession = await prismadb.chatSession.create({
-      data: {
-        id: uuidv4(),
-        title: sessionTitle,
-        userId: user.id,
-        modelKey,
-        useDatabase: enableDatabaseQueries,
-        useKnowledgeBase,
-        temperature: temperature ?? AVAILABLE_MODELS[modelKey].temperature,
-        lastMessageAt: new Date(),
-        messageCount: 0,
-      },
+    // Use or create default session
+    chatSession = await prismadb.chatSession.findFirst({
+      where: { id: defaultSessionId, userId: user.id },
     });
+
+    if (!chatSession) {
+      isNewSession = true;
+      const initialModelKey: ModelKey =
+        (selectedModel && selectedModel in AVAILABLE_MODELS
+          ? (selectedModel as ModelKey)
+          : "deepseek-r1:7b");
+
+      chatSession = await prismadb.chatSession.create({
+        data: {
+          id: defaultSessionId,
+          title: "Default Chat",
+          userId: user.id,
+          modelKey: initialModelKey,
+          useDatabase: enableDatabaseQueries,
+          useKnowledgeBase,
+          temperature:
+            temperature ?? AVAILABLE_MODELS[initialModelKey].temperature,
+          lastMessageAt: new Date(),
+          messageCount: 0,
+        },
+      });
+    }
   }
 
-  // 5. Save user message to database
+  // 4) Choose the effective model for this turn
+  //    IMPORTANT: default to the session's saved model (prevents memory key drift)
+  const effectiveModelKey: ModelKey =
+    (selectedModel && selectedModel in AVAILABLE_MODELS
+      ? (selectedModel as ModelKey)
+      : (chatSession.modelKey as ModelKey)) || "deepseek-r1:7b";
+
+  // 5) Should we update the title after first reply?
+  const shouldUpdateTitle =
+    chatSession.messageCount === 0 ||
+    (chatSession.title &&
+      (chatSession.title === "New Chat" ||
+        chatSession.title.startsWith("New Chat ") ||
+        /^New Chat\b/i.test(chatSession.title)));
+
+  // 6) Persist the user message
   await prismadb.chatMessage.create({
     data: {
       content: userMessage,
@@ -183,31 +186,28 @@ async function handleChatMessage(body: any, user: any) {
     },
   });
 
-  // 6. Configure and create AI agent
+  // 7) Configure agent strictly from session settings (stable)
   const agentConfig: Partial<AgentConfig> = {
-    modelKey,
+    modelKey: effectiveModelKey,
     useMemory: true,
     useDatabase: chatSession.useDatabase,
     useKnowledgeBase: chatSession.useKnowledgeBase,
     streaming: true,
     temperature: temperature ?? chatSession.temperature,
-    contextWindow: AVAILABLE_MODELS[modelKey].contextWindow,
+    contextWindow: AVAILABLE_MODELS[effectiveModelKey].contextWindow,
   };
   const agent = createChatAgent(agentConfig);
 
-  // 7. Create context for the agent
+  // 8) Build agent context with the stable session id
   const context = {
     userId: user.id,
     userName: `${user.firstName || ""} ${user.lastName || ""}`.trim(),
-    sessionId: chatSession.id,
+    sessionId: chatSession.id, // <— this is the key for consistent memory
   };
 
-  // 8. Generate streaming response
+  // 9) Stream response and persist assistant message & session updates
   let responseContent = "";
   const originalStream = await agent.generateStreamingResponse(userMessage, context);
-
-  const preMessageCount = chatSession.messageCount;
-  const preTitle = chatSession.title;
 
   const responseStream = new ReadableStream({
     async start(controller) {
@@ -217,20 +217,17 @@ async function handleChatMessage(body: any, user: any) {
       try {
         while (true) {
           const { done, value } = await reader.read();
-
           if (done) break;
 
           const chunk = decoder.decode(value, { stream: true });
           responseContent += chunk;
-
-          // Forward the chunk to the client
           controller.enqueue(value);
         }
       } finally {
         reader.releaseLock();
         controller.close();
 
-        // Save assistant response to database
+        // Save assistant message + update session
         try {
           await prismadb.chatMessage.create({
             data: {
@@ -238,65 +235,52 @@ async function handleChatMessage(body: any, user: any) {
               role: "ASSISTANT",
               sessionId: chatSession.id,
               userId: user.id,
-              modelUsed: modelKey,
+              modelUsed: effectiveModelKey, // <- persist actual model used
             },
           });
-
-          const shouldAutoRename =
-            isNewSession ||
-            preMessageCount === 0 ||
-            /^New Chat\b/i.test(preTitle || "");
 
           const updates: any = {
             lastMessageAt: new Date(),
             messageCount: { increment: 2 }, // user + assistant
           };
 
-          if (shouldAutoRename && responseContent.trim().length > 0) {
-            updates.title = generateBetterSessionTitle(userMessage, responseContent);
+          if (shouldUpdateTitle && responseContent.trim().length > 0) {
+            const newTitle = generateSessionTitle(userMessage);
+            updates.title = newTitle;
+            console.log(
+              `Updating session title from "${chatSession.title}" to "${newTitle}"`
+            );
           }
 
-          // Update session metadata
           await prismadb.chatSession.update({
             where: { id: chatSession.id },
-            data: {
-              lastMessageAt: new Date(),
-              messageCount: { increment: 2 }, // User + Assistant message
-              ...(isNewSession && responseContent.length > 50 ? {
-                title: generateBetterSessionTitle(userMessage, responseContent)
-              } : {}),
-            },
+            data: updates,
           });
-
-
         } catch (error) {
-          console.error("Failed to save response to database:", error);
+          console.error("Failed to save response/session:", error);
         }
       }
     },
   });
 
-  // 9. Create streaming text response with session info
+  // 10) Return streaming response with helpful headers for the client
   const response = new StreamingTextResponse(responseStream);
-
-  // Add session info to headers
   response.headers.set("X-Session-ID", chatSession.id);
   response.headers.set("X-Is-New-Session", String(isNewSession));
-  response.headers.set("X-Model-Used", modelKey);
-
+  response.headers.set("X-Model-Used", effectiveModelKey);
+  response.headers.set("X-Title-Updated", String(shouldUpdateTitle));
   return response;
 }
-
-// GET Handler - Enhanced with proper rate limiting
+  
+/* --------------------------------- GET ---------------------------------- */
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const action = searchParams.get("action") || "info";
 
-    // Apply different rate limits based on action
-    let rateLimitType: 'chat_sessions' | 'default' = 'default';
-    if (action === 'sessions' || action === 'session') {
-      rateLimitType = 'chat_sessions';
+    let rateLimitType: "chat_sessions" | "default" = "default";
+    if (action === "sessions" || action === "session") {
+      rateLimitType = "chat_sessions";
     }
 
     switch (action) {
@@ -309,14 +293,8 @@ export async function GET(request: Request) {
         const archived = searchParams.get("archived") === "true";
 
         const sessions = await prismadb.chatSession.findMany({
-          where: {
-            userId: user.id,
-            isArchived: archived,
-          },
-          orderBy: [
-            { isPinned: "desc" },
-            { lastMessageAt: "desc" },
-          ],
+          where: { userId: user.id, isArchived: archived },
+          orderBy: [{ isPinned: "desc" }, { lastMessageAt: "desc" }],
           take: limit,
           select: {
             id: true,
@@ -333,8 +311,8 @@ export async function GET(request: Request) {
         return NextResponse.json({
           sessions,
           total: sessions.length,
-          cached: false, // Indicate this is fresh data
-          timestamp: new Date().toISOString()
+          cached: false,
+          timestamp: new Date().toISOString(),
         });
       }
 
@@ -344,19 +322,12 @@ export async function GET(request: Request) {
 
         const { user } = authResult;
         const sessionId = searchParams.get("sessionId");
-
         if (!sessionId) {
-          return NextResponse.json(
-            { error: "Session ID required" },
-            { status: 400 }
-          );
+          return NextResponse.json({ error: "Session ID required" }, { status: 400 });
         }
 
         const session = await prismadb.chatSession.findFirst({
-          where: {
-            id: sessionId,
-            userId: user.id,
-          },
+          where: { id: sessionId, userId: user.id },
           include: {
             chatMessages: {
               orderBy: { createdAt: "asc" },
@@ -375,20 +346,13 @@ export async function GET(request: Request) {
         });
 
         if (!session) {
-          return NextResponse.json(
-            { error: "Session not found" },
-            { status: 404 }
-          );
+          return NextResponse.json({ error: "Session not found" }, { status: 404 });
         }
 
-        return NextResponse.json({
-          session,
-          timestamp: new Date().toISOString()
-        });
+        return NextResponse.json({ session, timestamp: new Date().toISOString() });
       }
 
       case "models": {
-        // Models endpoint doesn't need authentication
         const models = Object.entries(AVAILABLE_MODELS).map(([key, config]) => ({
           id: key,
           name: config.name,
@@ -402,10 +366,7 @@ export async function GET(request: Request) {
         return NextResponse.json({
           status: "healthy",
           timestamp: new Date().toISOString(),
-          services: {
-            database: "operational",
-            ai_agent: "operational",
-          },
+          services: { database: "operational", ai_agent: "operational" },
         });
       }
 
@@ -414,7 +375,8 @@ export async function GET(request: Request) {
           api_info: {
             name: "Enhanced Session-Based Chat API",
             version: "4.2",
-            description: "Session-based conversational AI with rate limiting and session creation",
+            description:
+              "Session-based conversational AI with rate limiting and session creation",
           },
         });
     }
@@ -423,35 +385,34 @@ export async function GET(request: Request) {
   }
 }
 
-// PUT Handler - Update session settings
+/* --------------------------------- PUT ---------------------------------- */
 export async function PUT(request: Request) {
   try {
-    const authResult = await handleAuthAndRateLimit(request, 'update_session');
+    const authResult = await handleAuthAndRateLimit(request, "update_session");
     if (!authResult.success) return authResult.error;
 
     const { user } = authResult;
     const body = await request.json();
-    const { sessionId, title, isPinned, isArchived, modelKey, temperature, useDatabase, useKnowledgeBase } = body;
+    const {
+      sessionId,
+      title,
+      isPinned,
+      isArchived,
+      modelKey,
+      temperature,
+      useDatabase,
+      useKnowledgeBase,
+    } = body;
 
     if (!sessionId) {
-      return NextResponse.json(
-        { error: "Session ID required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Session ID required" }, { status: 400 });
     }
 
     const session = await prismadb.chatSession.findFirst({
-      where: {
-        id: sessionId,
-        userId: user.id,
-      },
+      where: { id: sessionId, userId: user.id },
     });
-
     if (!session) {
-      return NextResponse.json(
-        { error: "Session not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
     const updatedSession = await prismadb.chatSession.update({
@@ -474,10 +435,10 @@ export async function PUT(request: Request) {
   }
 }
 
-// DELETE Handler - Delete or archive session
+/* -------------------------------- DELETE -------------------------------- */
 export async function DELETE(request: Request) {
   try {
-    const authResult = await handleAuthAndRateLimit(request, 'delete_session');
+    const authResult = await handleAuthAndRateLimit(request, "delete_session");
     if (!authResult.success) return authResult.error;
 
     const { user } = authResult;
@@ -486,24 +447,14 @@ export async function DELETE(request: Request) {
     const archive = searchParams.get("archive") === "true";
 
     if (!sessionId) {
-      return NextResponse.json(
-        { error: "Session ID required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Session ID required" }, { status: 400 });
     }
 
     const session = await prismadb.chatSession.findFirst({
-      where: {
-        id: sessionId,
-        userId: user.id,
-      },
+      where: { id: sessionId, userId: user.id },
     });
-
     if (!session) {
-      return NextResponse.json(
-        { error: "Session not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
     if (archive) {
@@ -511,33 +462,28 @@ export async function DELETE(request: Request) {
         where: { id: sessionId },
         data: { isArchived: true },
       });
-
-      return NextResponse.json({
-        message: "Session archived successfully",
-        sessionId,
-      });
+      return NextResponse.json({ message: "Session archived successfully", sessionId });
     } else {
-      await prismadb.chatSession.delete({
-        where: { id: sessionId },
-      });
-
-      return NextResponse.json({
-        message: "Session deleted successfully",
-        sessionId,
-      });
+      await prismadb.chatSession.delete({ where: { id: sessionId } });
+      return NextResponse.json({ message: "Session deleted successfully", sessionId });
     }
   } catch (error: any) {
     return createErrorResponse(error);
   }
 }
 
-// Helper functions
+/* ------------------------------- Helpers -------------------------------- */
 function generateSessionTitle(firstMessage: string): string {
-  const title = firstMessage.slice(0, 60).trim();
-  return title.length < firstMessage.length ? `${title}...` : title;
+  const cleanMessage = firstMessage
+    .trim()
+    .replace(/\n+/g, " ")
+    .replace(/\s+/g, " ")
+    .substring(0, 50);
+  return cleanMessage.length < firstMessage.trim().length
+    ? `${cleanMessage}...`
+    : cleanMessage;
 }
 
 function generateBetterSessionTitle(userMessage: string, assistantResponse: string): string {
-  const title = userMessage.slice(0, 50).trim();
-  return title.length < userMessage.length ? `${title}...` : title;
+  return generateSessionTitle(userMessage);
 }

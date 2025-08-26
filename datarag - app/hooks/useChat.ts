@@ -1,4 +1,4 @@
-// hooks/useChat.ts - Fixed version to prevent request spam
+// hooks/useChat.ts - Updated to handle title updates properly
 import { useState, useCallback, useRef, useMemo } from 'react';
 
 interface ChatSession {
@@ -53,6 +53,8 @@ export const useChat = (options: UseChatOptions = {}) => {
     isFetchingSessions: false,
     isFetchingSession: false,
   });
+
+  const lastSessionIdRef = useRef<string | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -128,7 +130,24 @@ export const useChat = (options: UseChatOptions = {}) => {
       }
 
       const data = await response.json();
-      setCurrentSession(data.session);
+      const session = data.session;
+
+      setCurrentSession(session);
+
+      // Update the sessions list with the latest session data (including updated title)
+      setSessions(prev => prev.map(s =>
+        s.id === sessionId
+          ? {
+            ...s,
+            title: session.title,
+            messageCount: session.chatMessages.length,
+            lastMessageAt: session.lastMessageAt || s.lastMessageAt,
+            isPinned: session.isPinned,
+            isArchived: session.isArchived
+          }
+          : s
+      ));
+
     } catch (error) {
       console.error('Error fetching session:', error);
       onError?.(error as Error);
@@ -142,31 +161,45 @@ export const useChat = (options: UseChatOptions = {}) => {
   const sendMessage = useCallback(async (
     message: string,
     sessionId?: string,
-    options: { model?: string; useKnowledgeBase?: boolean; enableDatabaseQueries?: boolean; temperature?: number } = {}
+    options: {
+      model?: string;
+      useKnowledgeBase?: boolean;
+      enableDatabaseQueries?: boolean;
+      temperature?: number;
+    } = {}
   ) => {
     if (!message.trim() || isLoading) return null;
 
+    // Abort any in-flight request
     if (abortControllerRef.current) abortControllerRef.current.abort();
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
     setIsLoading(true);
 
-    // --- 1) Optimistic USER message
+    // 1) Optimistic USER message
     const userMsgId = `u-${Date.now()}`;
     const nowIso = new Date().toISOString();
-    const optimisticUser: ChatMessage = { id: userMsgId, role: 'USER', content: message.trim(), createdAt: nowIso };
+    const optimisticUser: ChatMessage = {
+      id: userMsgId,
+      role: "USER",
+      content: message.trim(),
+      createdAt: nowIso,
+    };
 
-    // Ensure we have a currentSession object; DO NOT invent a fake id.
-    // If there's no session in state yet, create a minimal one without a fake id;
-    // just enough so ChatInterface renders the bubbles immediately.
+    // Is this the first message in the visible session?
+    const isFirstMessage = !currentSession || currentSession.chatMessages.length === 0;
+
+    // Ensure UI shows the user bubble immediately (don’t invent a fake id)
     setCurrentSession(prev => {
-      if (prev) return { ...prev, chatMessages: [...prev.chatMessages, optimisticUser] };
+      if (prev) {
+        return { ...prev, chatMessages: [...prev.chatMessages, optimisticUser] };
+      }
       return {
-        id: '', // empty for now; we'll fix after server responds
-        title: 'New Chat',
+        id: "", // will be set as soon as we read it from response headers
+        title: "New Chat",
         chatMessages: [optimisticUser],
-        modelKey: options.model || 'deepseek-r1:7b',
+        modelKey: options.model || "deepseek-r1:7b",
         useDatabase: options.enableDatabaseQueries ?? true,
         useKnowledgeBase: options.useKnowledgeBase ?? true,
         temperature: options.temperature ?? 0.2,
@@ -175,48 +208,71 @@ export const useChat = (options: UseChatOptions = {}) => {
       };
     });
 
-    // Also bump sidebar preview if we already have a concrete session id
+    // Sidebar preview bump if we already have a concrete session id
     if (currentSession?.id) {
-      setSessions(prev => prev.map(s =>
-        s.id === currentSession.id ? { ...s, lastMessageAt: nowIso, messageCount: s.messageCount + 1 } : s
-      ));
+      setSessions(prev =>
+        prev.map(s =>
+          s.id === currentSession.id
+            ? { ...s, lastMessageAt: nowIso, messageCount: s.messageCount + 1 }
+            : s
+        )
+      );
     }
 
-    // --- 2) Temp ASSISTANT bubble to stream into
+    // 2) Temporary ASSISTANT bubble to stream into
     const asstTempId = `a-${Date.now()}`;
-    setCurrentSession(prev => prev ? {
-      ...prev,
-      chatMessages: [...prev.chatMessages, { id: asstTempId, role: 'ASSISTANT', content: '', createdAt: new Date().toISOString() }]
-    } : prev);
+    setCurrentSession(prev =>
+      prev
+        ? {
+          ...prev,
+          chatMessages: [
+            ...prev.chatMessages,
+            { id: asstTempId, role: "ASSISTANT", content: "", createdAt: new Date().toISOString() },
+          ],
+        }
+        : prev
+    );
 
     try {
-      const body = {
-        messages: [{ role: 'user', content: message.trim() }],
-        sessionId, // may be undefined for first message—server should create one
-        model: options.model || currentSession?.modelKey || 'deepseek-r1:7b',
+      // ---- Choose a stable session id for this request ----
+      const currentId = currentSession?.id && currentSession.id.trim() ? currentSession.id : undefined;
+      const effectiveSessionId = sessionId ?? currentId ?? lastSessionIdRef.current ?? undefined;
+
+      // ---- Build request body ----
+      // Only send `model` if caller explicitly switches; otherwise let the server use the session’s model.
+      const body: any = {
+        messages: [{ role: "user", content: message.trim() }],
+        sessionId: effectiveSessionId,
+        ...(options.model ? { model: options.model } : {}),
         useKnowledgeBase: options.useKnowledgeBase ?? currentSession?.useKnowledgeBase ?? true,
         enableDatabaseQueries: options.enableDatabaseQueries ?? currentSession?.useDatabase ?? true,
         temperature: options.temperature ?? currentSession?.temperature ?? 0.2,
       };
 
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: abortController.signal,
       });
       if (!response.ok) throw new Error(`Failed to send message: ${response.statusText}`);
 
-      // Get the authoritative session id (headers first, else fallback to the input/current)
-      const responseSessionId = response.headers.get('X-Session-ID') || sessionId || currentSession?.id || '';
-      const isNewSession = response.headers.get('X-Is-New-Session') === 'true';
+      // Authoritative ids/flags from server
+      const responseSessionId =
+        response.headers.get("X-Session-ID") || effectiveSessionId || currentSession?.id || "";
+
+      // Persist it for future sends (even if React state hasn’t caught up yet)
+      if (responseSessionId) lastSessionIdRef.current = responseSessionId;
+
+      const isNewSession = response.headers.get("X-Is-New-Session") === "true";
+      const titleUpdated = response.headers.get("X-Title-Updated") === "true";
 
       if (isNewSession && responseSessionId) {
         onSessionCreated?.(responseSessionId);
         await fetchSessions(false, true);
       }
 
-      // --- 3) STREAM into the temp assistant bubble
+      // 3) Stream response into the temp assistant bubble
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
 
@@ -229,12 +285,12 @@ export const useChat = (options: UseChatOptions = {}) => {
             const chunk = decoder.decode(value, { stream: true });
             if (!chunk) continue;
 
-            // Append streamed chunk into the temp assistant bubble
             setCurrentSession(prev => {
               if (!prev) return prev;
               const msgs = prev.chatMessages.map(m =>
-                m.id === asstTempId ? { ...m, content: (m.content || '') + chunk } : m
+                m.id === asstTempId ? { ...m, content: (m.content || "") + chunk } : m
               );
+              // ensure we set the concrete id asap
               return { ...prev, id: prev.id || responseSessionId, chatMessages: msgs };
             });
           }
@@ -243,22 +299,22 @@ export const useChat = (options: UseChatOptions = {}) => {
         }
       }
 
-      // --- 4) Final reconcile with server truth
-      // Some servers append metadata, db flags, etc. Force-refresh from backend.
-      if (responseSessionId) {
-        // ensure no skip
-        requestTrackingRef.current.lastSessionFetch = '';
-        await fetchSession(responseSessionId, true);
+      // 4) Final reconcile with server truth (title, counts, etc.)
+      if (responseSessionId && (isFirstMessage || titleUpdated || isNewSession)) {
+        setTimeout(() => {
+          requestTrackingRef.current.lastSessionFetch = "";
+          fetchSession(responseSessionId, true);
+        }, 100);
       }
 
       return { sessionId: responseSessionId, isNewSession };
     } catch (error) {
-      // On error, remove temp assistant and (optionally) the optimistic user message
+      // On error, remove temp assistant bubble; keep the user bubble
       setCurrentSession(prev => {
         if (!prev) return prev;
         return {
           ...prev,
-          chatMessages: prev.chatMessages.filter(m => m.id !== asstTempId), // keep user bubble
+          chatMessages: prev.chatMessages.filter(m => m.id !== asstTempId),
         };
       });
       onError?.(error as Error);
@@ -267,7 +323,17 @@ export const useChat = (options: UseChatOptions = {}) => {
       setIsLoading(false);
       abortControllerRef.current = null;
     }
-  }, [isLoading, currentSession, onError, onSessionCreated, fetchSessions, fetchSession, setCurrentSession, setSessions]);
+  }, [
+    isLoading,
+    currentSession,
+    onError,
+    onSessionCreated,
+    fetchSessions,
+    fetchSession,
+    setCurrentSession,
+    setSessions,
+  ]);
+
   // Update session
   const updateSession = useCallback(async (
     sessionId: string,
@@ -365,7 +431,7 @@ export const useChat = (options: UseChatOptions = {}) => {
     try {
       const body = {
         action: 'create',
-        title: options?.title || `New Chat ${new Date().toLocaleString()}`,
+        title: options?.title || 'New Chat', // Start with generic title
         modelKey: options?.model || 'deepseek-r1:7b',
         useKnowledgeBase: options?.useKnowledgeBase ?? true,
         useDatabase: options?.enableDatabaseQueries ?? true,

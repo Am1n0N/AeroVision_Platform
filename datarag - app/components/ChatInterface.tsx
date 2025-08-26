@@ -1,4 +1,4 @@
-// components/ChatInterface.tsx - Fixed version to prevent request spam
+// components/ChatInterface.tsx - Dark-mode + grayscale only
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   MessageCircle,
@@ -91,8 +91,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
 
     lastArchiveFilter.current = showArchived;
 
-    console.log(`ChatInterface: Archive filter changed to ${showArchived}, fetching sessions...`);
-
     // Debounce the fetch to prevent rapid requests
     const timeoutId = setTimeout(() => {
       fetchSessions(showArchived, true);
@@ -149,7 +147,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
   }, [updateSession]);
 
   const handleArchiveToggle = useCallback((newArchiveState: boolean) => {
-    console.log(`ChatInterface: Toggling archive to ${newArchiveState}`);
     setShowArchived(newArchiveState);
   }, []);
 
@@ -160,7 +157,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
     return (
       <div
         ref={dropdownRef}
-        className="absolute right-0 top-8 w-48 bg-white rounded-lg shadow-lg border border-gray-200 z-10"
+        className="absolute right-0 top-8  w-48 bg-white dark:bg-neutral-900 rounded-lg shadow-lg border border-gray-200 dark:border-neutral-700 z-10"
       >
         <div className="p-1">
           <button
@@ -168,7 +165,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
               setEditingTitle(sessionId);
               setShowDropdown(null);
             }}
-            className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50 rounded flex items-center gap-2"
+            className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50 dark:hover:bg-neutral-800 rounded flex items-center gap-2 text-gray-800 dark:text-gray-200"
           >
             <Edit3 size={14} />
             Rename
@@ -179,7 +176,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
               updateSession(sessionId, { isPinned: !session.isPinned });
               setShowDropdown(null);
             }}
-            className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50 rounded flex items-center gap-2"
+            className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50 dark:hover:bg-neutral-800 rounded flex items-center gap-2 text-gray-800 dark:text-gray-200"
           >
             <Pin size={14} />
             {session.isPinned ? 'Unpin' : 'Pin'}
@@ -190,13 +187,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
               deleteSession(sessionId, true);
               setShowDropdown(null);
             }}
-            className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50 rounded flex items-center gap-2"
+            className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50 dark:hover:bg-neutral-800 rounded flex items-center gap-2 text-gray-800 dark:text-gray-200"
           >
             <Archive size={14} />
             Archive
           </button>
 
-          <div className="border-t border-gray-100 my-1"></div>
+          <div className="border-t border-gray-100 dark:border-neutral-800 my-1"></div>
 
           <button
             onClick={() => {
@@ -205,9 +202,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
               }
               setShowDropdown(null);
             }}
-            className="w-full px-3 py-2 text-left text-sm hover:bg-red-50 text-red-600 rounded flex items-center gap-2"
+            className="w-full px-3 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-neutral-800 text-gray-800 dark:text-gray-200 rounded flex items-center gap-2"
           >
-            <Trash2 size={14} />
+            <Trash2 size={14} className="text-gray-500 dark:text-gray-400" />
             Delete
           </button>
         </div>
@@ -216,18 +213,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
   };
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex h-screen -mt-16 bg-gray-50 dark:bg-black">
       {/* Sidebar */}
-      <div className={`${sidebarCollapsed ? 'w-16' : 'w-80'} bg-white border-r border-gray-200 flex flex-col transition-all duration-200`}>
+      <div className={`${sidebarCollapsed ? 'w-16' : 'w-80'} bg-white dark:bg-neutral-950 border-r border-gray-200 dark:border-neutral-800 flex flex-col transition-all duration-200`}>
         {/* Header */}
-        <div className="p-4 border-b border-gray-200">
+        <div className="p-4 mt-16 border-b border-gray-200 dark:border-neutral-800">
           {!sidebarCollapsed && (
             <>
               <div className="flex items-center justify-between mb-4">
-                <h1 className="text-xl font-semibold text-gray-900">Chats</h1>
+                <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Chats</h1>
                 <button
                   onClick={createNewSession}
-                  className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  className="p-2 rounded-lg bg-gray-900 text-white hover:bg-black dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white transition-colors"
                   title="New Chat"
                 >
                   <Plus size={16} />
@@ -235,18 +232,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
               </div>
 
               <div className="relative mb-3">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={16} />
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500" size={16} />
                 <input
                   type="text"
                   placeholder="Search conversations..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full pl-10 pr-3 py-2 border border-gray-300 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-gray-500 focus:border-transparent"
                 />
                 {searchTerm && (
                   <button
                     onClick={() => setSearchTerm('')}
-                    className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
                   >
                     <X size={16} />
                   </button>
@@ -257,7 +254,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                 <button
                   onClick={() => handleArchiveToggle(false)}
                   className={`px-3 py-1 text-sm rounded transition-colors ${
-                    !showArchived ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+                    !showArchived
+                      ? 'bg-gray-200 text-gray-900 dark:bg-neutral-800 dark:text-gray-100'
+                      : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800'
                   }`}
                 >
                   Active
@@ -265,7 +264,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                 <button
                   onClick={() => handleArchiveToggle(true)}
                   className={`px-3 py-1 text-sm rounded transition-colors ${
-                    showArchived ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+                    showArchived
+                      ? 'bg-gray-200 text-gray-900 dark:bg-neutral-800 dark:text-gray-100'
+                      : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800'
                   }`}
                 >
                   Archived
@@ -281,7 +282,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
             <div className="p-2">
               {isLoadingSessions ? (
                 <div className="flex items-center justify-center p-8">
-                  <Loader2 className="animate-spin text-gray-400" size={24} />
+                  <Loader2 className="animate-spin text-gray-400 dark:text-gray-500" size={24} />
                 </div>
               ) : (
                 <>
@@ -290,8 +291,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                       key={session.id}
                       className={`group relative p-3 rounded-lg cursor-pointer transition-colors mb-1 ${
                         currentSession?.id === session.id
-                          ? 'bg-blue-50 border border-blue-200'
-                          : 'hover:bg-gray-50'
+                          ? 'bg-gray-100 dark:bg-neutral-800 border border-gray-300 dark:border-neutral-700'
+                          : 'hover:bg-gray-50 dark:hover:bg-neutral-900'
                       }`}
                     >
                       <div
@@ -303,7 +304,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                             <input
                               type="text"
                               defaultValue={session.title}
-                              className="w-full text-sm font-medium bg-transparent border border-blue-300 rounded px-2 py-1 outline-none focus:ring-2 focus:ring-blue-500"
+                              className="w-full text-sm font-medium bg-white dark:bg-neutral-900 text-gray-900 dark:text-gray-100 border border-gray-300 dark:border-neutral-700 rounded px-2 py-1 outline-none focus:ring-2 focus:ring-gray-500"
                               onBlur={(e) => handleTitleEdit(session.id, e.target.value)}
                               onKeyPress={(e) => {
                                 if (e.key === 'Enter') {
@@ -317,12 +318,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                               onClick={(e) => e.stopPropagation()}
                             />
                           ) : (
-                            <h3 className="text-sm font-medium text-gray-900 truncate flex items-center gap-1">
-                              {session.isPinned && <Pin size={12} className="text-blue-500 flex-shrink-0" />}
-                              {session.title}
+                            <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate flex items-center gap-1">
+                              {session.isPinned && <Pin size={12} className="text-gray-500 dark:text-gray-400 flex-shrink-0" />}
+                              {currentSession?.id === session.id ? (currentSession.title || session.title) : session.title}
                             </h3>
                           )}
-                          <p className="text-xs text-gray-500 mt-1">
+                          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                             {formatRelativeTime(session.lastMessageAt)} • {session.messageCount} messages
                           </p>
                         </div>
@@ -333,7 +334,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                               e.stopPropagation();
                               setShowDropdown(showDropdown === session.id ? null : session.id);
                             }}
-                            className="p-1 hover:bg-gray-200 rounded"
+                            className="p-1 hover:bg-gray-200 dark:hover:bg-neutral-800 rounded text-gray-700 dark:text-gray-200"
                           >
                             <MoreVertical size={14} />
                           </button>
@@ -345,7 +346,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                       </div>
 
                       <div className="flex items-center gap-2 mt-2">
-                        <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded">
+                        <span className="text-xs px-2 py-1 bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-gray-200 rounded">
                           {session.modelKey}
                         </span>
                       </div>
@@ -353,8 +354,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                   ))}
 
                   {filteredSessions.length === 0 && !isLoadingSessions && (
-                    <div className="p-4 text-center text-gray-500">
-                      <MessageCircle size={32} className="mx-auto mb-2 text-gray-300" />
+                    <div className="p-4 text-center text-gray-500 dark:text-gray-400">
+                      <MessageCircle size={32} className="mx-auto mb-2 text-gray-300 dark:text-gray-600" />
                       <p className="text-sm">
                         {searchTerm
                           ? 'No matching conversations'
@@ -366,7 +367,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                       {!searchTerm && !showArchived && (
                         <button
                           onClick={createNewSession}
-                          className="mt-2 text-blue-600 hover:text-blue-700 text-sm"
+                          className="mt-2 text-gray-900 dark:text-gray-100 hover:underline"
                         >
                           Start your first chat
                         </button>
@@ -380,10 +381,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
         </div>
 
         {/* Collapse Toggle */}
-        <div className="p-2 border-t border-gray-200">
+        <div className="p-2 border-t border-gray-200 dark:border-neutral-800">
           <button
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            className="w-full p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+            className="w-full p-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
             title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
             <MessageCircle size={16} className="mx-auto" />
@@ -396,16 +397,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
         {currentSession ? (
           <>
             {/* Chat Header */}
-            <div className="bg-white border-b border-gray-200 p-4">
+            <div className="bg-white mt-16 dark:bg-neutral-950 border-b border-gray-200 dark:border-neutral-800 p-4">
               <div className="flex items-center justify-between">
                 <div className="flex-1 min-w-0">
-                  <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2 truncate">
-                    {currentSession.isPinned && <Pin size={16} className="text-blue-500 flex-shrink-0" />}
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2 truncate">
+                    {currentSession.isPinned && <Pin size={16} className="text-gray-500 dark:text-gray-400 flex-shrink-0" />}
                     {currentSession.title}
                   </h2>
-                  <div className="flex items-center gap-4 mt-1 text-sm text-gray-500 flex-wrap">
+                  <div className="flex items-center gap-4 mt-1 text-sm text-gray-500 dark:text-gray-400 flex-wrap">
                     <span className="flex items-center gap-1">
-                      <span className="w-2 h-2 bg-green-400 rounded-full"></span>
+                      <span className="w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full"></span>
                       {currentSession.modelKey}
                     </span>
                     {currentSession.useDatabase && (
@@ -420,7 +421,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                         Knowledge
                       </span>
                     )}
-                    <span className="text-gray-400">•</span>
+                    <span className="text-gray-300 dark:text-gray-600">•</span>
                     <span>{currentSession.chatMessages.length} messages</span>
                   </div>
                 </div>
@@ -430,22 +431,22 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                     onClick={() => updateSession(currentSession.id, { isPinned: !currentSession.isPinned })}
                     className={`p-2 rounded-lg transition-colors ${
                       currentSession.isPinned
-                        ? 'bg-blue-100 text-blue-600'
-                        : 'text-gray-400 hover:bg-gray-100'
+                        ? 'bg-gray-200 text-gray-900 dark:bg-neutral-800 dark:text-gray-100'
+                        : 'text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-neutral-800'
                     }`}
                     title={currentSession.isPinned ? 'Unpin chat' : 'Pin chat'}
                   >
                     <Pin size={16} />
                   </button>
                   <button
-                    className="p-2 text-gray-400 hover:bg-gray-100 rounded-lg transition-colors"
+                    className="p-2 text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-neutral-800 rounded-lg transition-colors"
                     title="Chat settings"
                   >
                     <Settings size={16} />
                   </button>
                   <button
                     onClick={() => deleteSession(currentSession.id, true)}
-                    className="p-2 text-gray-400 hover:bg-gray-100 rounded-lg transition-colors"
+                    className="p-2 text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-neutral-800 rounded-lg transition-colors"
                     title="Archive chat"
                   >
                     <Archive size={16} />
@@ -455,7 +456,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
             </div>
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50 dark:bg-black">
               {currentSession.chatMessages.map((message: any) => (
                 <div
                   key={message.id}
@@ -464,17 +465,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                   <div
                     className={`max-w-3xl rounded-lg p-4 ${
                       message.role === 'USER'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-white border border-gray-200'
+                        ? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900'
+                        : 'bg-white dark:bg-neutral-950 border border-gray-200 dark:border-neutral-800 text-gray-900 dark:text-gray-100'
                     }`}
                   >
                     <div className="whitespace-pre-wrap break-words">{message.content}</div>
 
                     {message.role === 'ASSISTANT' && message.content?.trim() && (
-                      <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-100 text-xs text-gray-500 flex-wrap">
+                      <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-100 dark:border-neutral-800 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
                         {message.modelUsed && (
                           <span className="flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 bg-green-400 rounded-full"></span>
+                            <span className="w-1.5 h-1.5 bg-gray-400 dark:bg-gray-500 rounded-full"></span>
                             {message.modelUsed}
                           </span>
                         )}
@@ -499,8 +500,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
 
               {isLoading && (
                 <div className="flex justify-start">
-                  <div className="bg-white border border-gray-200 rounded-lg p-4">
-                    <div className="flex items-center gap-2 text-gray-500">
+                  <div className="bg-white dark:bg-neutral-950 border border-gray-200 dark:border-neutral-800 rounded-lg p-4">
+                    <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400">
                       <Loader2 size={16} className="animate-spin" />
                       <span>AI is thinking...</span>
                     </div>
@@ -512,7 +513,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
             </div>
 
             {/* Input Area */}
-            <div className="bg-white border-t border-gray-200 p-4">
+            <div className="bg-white dark:bg-neutral-950 border-t border-gray-200 dark:border-neutral-800 p-4">
               <div className="max-w-4xl mx-auto">
                 <div className="flex items-end gap-3">
                   <div className="flex-1 min-h-0">
@@ -522,7 +523,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                       onChange={(e) => setInputMessage(e.target.value)}
                       onKeyPress={handleKeyPress}
                       placeholder="Type your message..."
-                      className="w-full px-4 py-3 border border-gray-300 rounded-lg resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent max-h-32"
+                      className="w-full px-4 py-3 border border-gray-300 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 resize-none focus:ring-2 focus:ring-gray-500 focus:border-transparent max-h-32"
                       rows={1}
                       disabled={isLoading}
                     />
@@ -530,7 +531,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                   <button
                     onClick={handleSendMessage}
                     disabled={!inputMessage.trim() || isLoading}
-                    className="p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                    className="p-3 rounded-lg transition-colors bg-gray-900 text-white hover:bg-black disabled:bg-gray-300 disabled:text-white disabled:cursor-not-allowed dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
                     title="Send message"
                   >
                     {isLoading ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
@@ -538,7 +539,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                 </div>
 
                 {/* Quick actions */}
-                <div className="flex items-center justify-between mt-3 text-xs text-gray-500">
+                <div className="flex items-center justify-between mt-3 text-xs text-gray-500 dark:text-gray-400">
                   <div className="flex items-center gap-4">
                     <span>Press Enter to send, Shift+Enter for new line</span>
                   </div>
@@ -562,38 +563,38 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
           </>
         ) : (
           // Welcome Screen
-          <div className="flex-1 flex items-center justify-center bg-gray-50 p-8">
+          <div className="flex-1 flex items-center justify-center bg-gray-50 dark:bg-black p-8">
             <div className="text-center max-w-4xl">
-              <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <MessageCircle size={32} className="text-blue-600" />
+              <div className="w-16 h-16 bg-gray-200 dark:bg-neutral-800 rounded-full flex items-center justify-center mx-auto mb-4">
+                <MessageCircle size={32} className="text-gray-700 dark:text-gray-200" />
               </div>
-              <h2 className="text-2xl font-semibold text-gray-900 mb-2">Welcome to AI Chat</h2>
-              <p className="text-gray-600 mb-8 max-w-md mx-auto">
+              <h2 className="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-2">Welcome to AI Chat</h2>
+              <p className="text-gray-600 dark:text-gray-400 mb-8 max-w-md mx-auto">
                 Start a new conversation or select an existing chat from the sidebar to continue where you left off.
               </p>
               <button
                 onClick={createNewSession}
-                className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2 mx-auto"
+                className="px-6 py-3 rounded-lg transition-colors bg-gray-900 text-white hover:bg-black dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white flex items-center gap-2 mx-auto"
               >
                 <Plus size={20} />
                 Start New Chat
               </button>
 
               <div className="mt-12 grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="text-center p-6 bg-white rounded-lg border border-gray-200">
-                  <Database className="w-8 h-8 text-blue-500 mx-auto mb-3" />
-                  <h3 className="font-medium text-gray-900 mb-2">Database Queries</h3>
-                  <p className="text-sm text-gray-600">Ask questions about your data and get insights with SQL queries</p>
+                <div className="text-center p-6 bg-white dark:bg-neutral-950 rounded-lg border border-gray-200 dark:border-neutral-800">
+                  <Database className="w-8 h-8 text-gray-600 dark:text-gray-300 mx-auto mb-3" />
+                  <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-2">Database Queries</h3>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">Ask questions about your data and get insights with SQL queries</p>
                 </div>
-                <div className="text-center p-6 bg-white rounded-lg border border-gray-200">
-                  <Book className="w-8 h-8 text-green-500 mx-auto mb-3" />
-                  <h3 className="font-medium text-gray-900 mb-2">Knowledge Base</h3>
-                  <p className="text-sm text-gray-600">Search through documents and get contextual answers</p>
+                <div className="text-center p-6 bg-white dark:bg-neutral-950 rounded-lg border border-gray-200 dark:border-neutral-800">
+                  <Book className="w-8 h-8 text-gray-600 dark:text-gray-300 mx-auto mb-3" />
+                  <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-2">Knowledge Base</h3>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">Search through documents and get contextual answers</p>
                 </div>
-                <div className="text-center p-6 bg-white rounded-lg border border-gray-200">
-                  <MessageCircle className="w-8 h-8 text-purple-500 mx-auto mb-3" />
-                  <h3 className="font-medium text-gray-900 mb-2">Conversation Memory</h3>
-                  <p className="text-sm text-gray-600">AI remembers context across your entire chat session</p>
+                <div className="text-center p-6 bg-white dark:bg-neutral-950 rounded-lg border border-gray-200 dark:border-neutral-800">
+                  <MessageCircle className="w-8 h-8 text-gray-600 dark:text-gray-300 mx-auto mb-3" />
+                  <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-2">Conversation Memory</h3>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">AI remembers context across your entire chat session</p>
                 </div>
               </div>
             </div>

@@ -19,8 +19,6 @@ const dbConfig = {
   database: process.env.MYSQL_DATABASE || "airportdata",
   ssl: process.env.MYSQL_SSL === "true" ? { rejectUnauthorized: false } : undefined,
   connectionLimit: Number(process.env.MYSQL_POOL_SIZE || 20),
-  acquireTimeout: Number(process.env.MYSQL_ACQUIRE_TIMEOUT_MS || 60_000),
-  timeout: Number(process.env.MYSQL_TIMEOUT_MS || 60_000),
   reconnect: true,
   idleTimeout: 300_000, // 5 minutes
   maxReconnects: 3,
