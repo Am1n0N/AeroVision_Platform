@@ -39,7 +39,7 @@ export const Documents = ({ data, displayMode }: DocumentsProps) => {
                 {document.title}
               </p>
               <div className="relative h-full w-full">
-                <PdfThumbnail pdfUrl={document.fileurl} />
+                <PdfThumbnail pdfUrl={document.fileUrl} />
               </div>
               <p className="text-xs line-clamp-2">{document.description}</p>
             </CardHeader>
@@ -56,7 +56,7 @@ export const Documents = ({ data, displayMode }: DocumentsProps) => {
 
   const columns = [
     {
-      accessorKey: "fileurl",
+      accessorKey: "fileUrl",
       header: "Thumbnail",
     },
     {

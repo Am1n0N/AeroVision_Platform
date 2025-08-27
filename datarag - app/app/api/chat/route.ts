@@ -1,489 +1,462 @@
-// app/api/chat/route.ts - Updated to keep session/model stable for memory continuity
-import dotenv from "dotenv";
-import { StreamingTextResponse } from "ai";
-import { NextResponse } from "next/server";
-import { v4 as uuidv4 } from "uuid";
-import prismadb from "@/lib/prismadb";
-import { type ModelKey } from "@/config/models";
+// app/api/chat/route.ts - Enhanced to include source references in responses
+import { NextRequest, NextResponse } from "next/server";
 import {
   createChatAgent,
+  handleAuthAndRateLimit,
   createErrorResponse,
+  setAgentResponseHeaders,
   validateChatRequest,
-  AVAILABLE_MODELS,
-  type AgentConfig,
+  type EnhancedAgentResponse,
+  type SourceReference
 } from "@/lib/agent";
-import { handleAuthAndRateLimit } from "@/lib/rate-limit";
+import prismadb from "@/lib/prismadb";
+import { v4 as uuidv4 } from "uuid";
+import { AVAILABLE_MODELS, type ModelKey } from "@/config/models";
 
-dotenv.config({ path: `.env` });
+function toAsciiHeaderValue(value: string): string {
+  // Replace CR/LF with spaces, convert non-ASCII chars to safe alternatives
+  return value
+    .replace(/[\r\n]+/g, " ")
+    .replace(/[""]/g, '"')        // Smart quotes to regular quotes
+    .replace(/['']/g, "'")        // Smart apostrophes to regular apostrophes
+    .replace(/[–—]/g, "-")        // Em/en dashes to hyphens
+    .replace(/[^\x20-\x7E]/g, "") // Remove any remaining non-ASCII chars
+    .trim()
+    .slice(0, 200); // Limit header length to prevent issues
+}
 
-// Main POST Handler
-export async function POST(request: Request) {
+// Enhanced response headers to include source references
+function setEnhancedAgentResponseHeaders(response: NextResponse, agentResponse: EnhancedAgentResponse, sessionId: string, isNewSession: boolean = false, titleUpdated: boolean = false): void {
+  // Set existing headers
+  setAgentResponseHeaders(response, agentResponse);
+
+  // Add source-specific headers
+  response.headers.set("X-Session-ID", toAsciiHeaderValue(sessionId));
+  response.headers.set("X-Is-New-Session", toAsciiHeaderValue(String(isNewSession)));
+  response.headers.set("X-Title-Updated", toAsciiHeaderValue(String(titleUpdated)));
+  response.headers.set("X-Source-Count", toAsciiHeaderValue(String(agentResponse.sources.length)));
+  response.headers.set("X-Source-Types", toAsciiHeaderValue(agentResponse.metadata.sourceTypes.join(",")));
+
+  // Include serialized sources in headers (for non-streaming responses)
+  if (agentResponse.sources.length > 0) {
+    try {
+      const sourcesJson = JSON.stringify(agentResponse.sources);
+      // Only include sources if they're not too large for headers
+      if (sourcesJson.length < 4000) {
+        response.headers.set("X-Sources", toAsciiHeaderValue(sourcesJson));
+      } else {
+        // For large source arrays, include a summary
+        const sourceSummary = agentResponse.sources.map(s => ({
+          id: s.id,
+          type: s.type,
+          title: s.title,
+          relevanceScore: s.relevanceScore
+        }));
+        response.headers.set("X-Sources-Summary", toAsciiHeaderValue(JSON.stringify(sourceSummary)));
+      }
+    } catch (error) {
+      console.warn("Failed to serialize sources for headers:", error);
+    }
+  }
+}
+
+// Helper to generate smart title from user message and sources
+async function generateSmartTitle(userMessage: string, sources: SourceReference[] = []): Promise<string> {
+  const message = userMessage.toLowerCase();
+
+  // Check if it's a database query
+  const dbKeywords = ['show', 'list', 'count', 'find', 'get', 'total', 'average', 'sum'];
+  if (dbKeywords.some(keyword => message.includes(keyword))) {
+    if (message.includes('flight')) return 'Flight Data Query';
+    if (message.includes('airport')) return 'Airport Analysis';
+    if (message.includes('airline')) return 'Airline Information';
+    return 'Database Query';
+  }
+
+  // Check sources for context
+  if (sources.length > 0) {
+    const hasDB = sources.some(s => s.type === 'database');
+    const hasDoc = sources.some(s => s.type === 'document');
+    const hasKB = sources.some(s => s.type === 'knowledge_base');
+
+    if (hasDB && hasDoc) return 'Data & Document Analysis';
+    if (hasDB) return 'Database Analysis';
+    if (hasDoc) return 'Document Discussion';
+    if (hasKB) return 'Knowledge Base Query';
+  }
+
+  // Fallback to truncated user message
+  const truncated = userMessage.slice(0, 50);
+  return truncated.length < userMessage.length ? truncated + '...' : truncated;
+}
+
+export async function POST(request: NextRequest) {
   try {
-    // 1) Auth + rate limit
-    const authResult = await handleAuthAndRateLimit(request, "send_message");
-    if (!authResult.success) return authResult.error;
-    const { user } = authResult;
+    // Authentication and rate limiting
+    const { user, success, error } = await handleAuthAndRateLimit(request);
+    if (!success || !user) return error!;
 
-    // 2) Parse body
     const body = await request.json();
 
-    // 3) Session creation
-    if (body.action === "create") {
-      return await handleSessionCreation(body, user);
+    console.log('Chat API POST body:', body);
+    // Handle session creation
+    if (body.action === 'create') {
+      try {
+        const newSession = await prismadb.chatSession.create({
+          data: {
+            id: uuidv4(),
+            title: body.title || 'New Chat',
+            userId: user.id,
+            modelKey: body.modelKey || 'MFDoom/deepseek-r1-tool-calling:7b',
+            useDatabase: body.useDatabase ?? true,
+            useKnowledgeBase: body.useKnowledgeBase ?? true,
+            temperature: body.temperature ?? 0.2,
+            isPinned: false,
+            isArchived: false,
+          },
+        });
+
+        return NextResponse.json({ session: newSession });
+      } catch (error) {
+        console.error('Failed to create session:', error);
+        return createErrorResponse(error, 500);
+      }
     }
 
-    // 4) Regular chat
-    return await handleChatMessage(body, user);
-  } catch (error: any) {
-    console.error("Error in POST handler:", error);
-    return createErrorResponse(error);
-  }
-}
-
-/* ---------------------- Session creation (unchanged) ---------------------- */
-async function handleSessionCreation(body: any, user: any) {
-  try {
-    const {
-      title,
-      modelKey = "deepseek-r1:7b",
-      useKnowledgeBase = true,
-      useDatabase = true,
-      temperature,
-    } = body;
-
-    const validModelKey: ModelKey =
-      modelKey in AVAILABLE_MODELS ? (modelKey as ModelKey) : "deepseek-r1:7b";
-
-    const sessionTitle = title || `New Chat ${new Date().toLocaleString()}`;
-
-    const newSession = await prismadb.chatSession.create({
-      data: {
-        id: uuidv4(),
-        title: sessionTitle,
-        userId: user.id,
-        modelKey: validModelKey,
-        useDatabase,
-        useKnowledgeBase,
-        temperature: temperature ?? AVAILABLE_MODELS[validModelKey].temperature,
-        lastMessageAt: new Date(),
-        messageCount: 0,
-        isPinned: false,
-        isArchived: false,
-      },
-    });
-
-    const sessionResponse = {
-      id: newSession.id,
-      title: newSession.title,
-      lastMessageAt: newSession.lastMessageAt,
-      messageCount: newSession.messageCount,
-      isPinned: newSession.isPinned,
-      isArchived: newSession.isArchived,
-      modelKey: newSession.modelKey,
-      createdAt: newSession.createdAt,
-      useDatabase: newSession.useDatabase,
-      useKnowledgeBase: newSession.useKnowledgeBase,
-      temperature: newSession.temperature,
-    };
-
-    return NextResponse.json({
-      session: sessionResponse,
-      message: "Session created successfully",
-    });
-  } catch (error: any) {
-    console.error("Error creating session:", error);
-    return createErrorResponse(error);
-  }
-}
-
-/* -------------------------- Chat message handler -------------------------- */
-async function handleChatMessage(body: any, user: any) {
-  // 1) Validate payload
-  const { userMessage, errors } = validateChatRequest(body);
-  if (errors.length > 0) {
-    return NextResponse.json(
-      { error: "Invalid request format", details: errors },
-      { status: 400 }
-    );
-  }
-
-  // 2) Extract params from body
-  const {
-    sessionId,
-    model: selectedModel,
-    useKnowledgeBase = true,
-    enableDatabaseQueries = true,
-    temperature,
-  } = body;
-
-  // 3) Load or create chatSession (use default if no sessionId)
-  let chatSession: any;
-  let isNewSession = false;
-  const defaultSessionId = `default-${user.id}`;
-
-  if (sessionId) {
-    chatSession = await prismadb.chatSession.findFirst({
-      where: { id: sessionId, userId: user.id },
-    });
-    if (!chatSession) {
-      return NextResponse.json(
-        { error: "Session not found or unauthorized" },
-        { status: 404 }
-      );
+    // Validate chat request
+    const { userMessage, errors, useReranking, rerankingThreshold, maxContextLength } = validateChatRequest(body);
+    if (errors.length > 0) {
+      return NextResponse.json({ error: errors.join(', ') }, { status: 400 });
     }
-  } else {
-    // Use or create default session
-    chatSession = await prismadb.chatSession.findFirst({
-      where: { id: defaultSessionId, userId: user.id },
-    });
 
-    if (!chatSession) {
-      isNewSession = true;
-      const initialModelKey: ModelKey =
-        (selectedModel && selectedModel in AVAILABLE_MODELS
-          ? (selectedModel as ModelKey)
-          : "deepseek-r1:7b");
+    // Get or create session
+    let sessionId = body.sessionId;
+    let isNewSession = false;
+    let titleUpdated = false;
 
-      chatSession = await prismadb.chatSession.create({
+    if (!sessionId) {
+      // Create new session
+      const newSession = await prismadb.chatSession.create({
         data: {
-          id: defaultSessionId,
-          title: "Default Chat",
+          id: uuidv4(),
+          title: 'New Chat', // Will be updated after we get the AI response
           userId: user.id,
-          modelKey: initialModelKey,
-          useDatabase: enableDatabaseQueries,
-          useKnowledgeBase,
-          temperature:
-            temperature ?? AVAILABLE_MODELS[initialModelKey].temperature,
-          lastMessageAt: new Date(),
-          messageCount: 0,
+          modelKey: body.model || 'MFDoom/deepseek-r1-tool-calling:7b',
+          useDatabase: body.enableDatabaseQueries ?? true,
+          useKnowledgeBase: body.useKnowledgeBase ?? true,
+          temperature: body.temperature ?? 0.2,
+          isPinned: false,
+          isArchived: false,
+        },
+      });
+      sessionId = newSession.id;
+      isNewSession = true;
+    }
+
+    // Fetch session details
+    const session = await prismadb.chatSession.findUnique({
+      where: { id: sessionId, userId: user.id },
+      include: { messages: { orderBy: { createdAt: 'asc' } } }
+    });
+
+    if (!session) {
+      return NextResponse.json({ error: 'Session not found' }, { status: 404 });
+    }
+
+    // Create agent with enhanced configuration
+    const agent = createChatAgent({
+      modelKey: body.model || session.modelKey,
+      temperature: body.temperature ?? session.temperature,
+      useDatabase: body.enableDatabaseQueries ?? session.useDatabase,
+      useKnowledgeBase: body.useKnowledgeBase ?? session.useKnowledgeBase,
+      useReranking: useReranking ?? true,
+      rerankingThreshold: rerankingThreshold ?? 0.5,
+      maxContextLength: maxContextLength ?? 6000,
+      streaming: body.stream ?? false,
+    });
+
+    // Check if we should handle streaming
+    if (body.stream) {
+      const stream = await agent.generateChatResponse(userMessage, {
+        userId: user.id,
+        userName: user.firstName || user.username || 'User',
+        sessionId: session.id,
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'X-Session-ID': sessionId,
+          'X-Is-New-Session': String(isNewSession),
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
         },
       });
     }
-  }
 
-  // 4) Choose the effective model for this turn
-  //    IMPORTANT: default to the session's saved model (prevents memory key drift)
-  const effectiveModelKey: ModelKey =
-    (selectedModel && selectedModel in AVAILABLE_MODELS
-      ? (selectedModel as ModelKey)
-      : (chatSession.modelKey as ModelKey)) || "deepseek-r1:7b";
-
-  // 5) Should we update the title after first reply?
-  const shouldUpdateTitle =
-    chatSession.messageCount === 0 ||
-    (chatSession.title &&
-      (chatSession.title === "New Chat" ||
-        chatSession.title.startsWith("New Chat ") ||
-        /^New Chat\b/i.test(chatSession.title)));
-
-  // 6) Persist the user message
-  await prismadb.chatMessage.create({
-    data: {
-      content: userMessage,
-      role: "USER",
-      sessionId: chatSession.id,
+    // Generate enhanced response with sources
+    const agentResponse = await agent.generateChatResponse(userMessage, {
       userId: user.id,
-    },
-  });
-
-  // 7) Configure agent strictly from session settings (stable)
-  const agentConfig: Partial<AgentConfig> = {
-    modelKey: effectiveModelKey,
-    useMemory: true,
-    useDatabase: chatSession.useDatabase,
-    useKnowledgeBase: chatSession.useKnowledgeBase,
-    streaming: true,
-    temperature: temperature ?? chatSession.temperature,
-    contextWindow: AVAILABLE_MODELS[effectiveModelKey].contextWindow,
-  };
-  const agent = createChatAgent(agentConfig);
-
-  // 8) Build agent context with the stable session id
-  const context = {
-    userId: user.id,
-    userName: `${user.firstName || ""} ${user.lastName || ""}`.trim(),
-    sessionId: chatSession.id, // <— this is the key for consistent memory
-  };
-
-  // 9) Stream response and persist assistant message & session updates
-  let responseContent = "";
-  const originalStream = await agent.generateStreamingResponse(userMessage, context);
-
-  const responseStream = new ReadableStream({
-    async start(controller) {
-      const reader = originalStream.getReader();
-      const decoder = new TextDecoder();
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const chunk = decoder.decode(value, { stream: true });
-          responseContent += chunk;
-          controller.enqueue(value);
-        }
-      } finally {
-        reader.releaseLock();
-        controller.close();
-
-        // Save assistant message + update session
-        try {
-          await prismadb.chatMessage.create({
-            data: {
-              content: responseContent,
-              role: "ASSISTANT",
-              sessionId: chatSession.id,
-              userId: user.id,
-              modelUsed: effectiveModelKey, // <- persist actual model used
-            },
-          });
-
-          const updates: any = {
-            lastMessageAt: new Date(),
-            messageCount: { increment: 2 }, // user + assistant
-          };
-
-          if (shouldUpdateTitle && responseContent.trim().length > 0) {
-            const newTitle = generateSessionTitle(userMessage);
-            updates.title = newTitle;
-            console.log(
-              `Updating session title from "${chatSession.title}" to "${newTitle}"`
-            );
-          }
-
-          await prismadb.chatSession.update({
-            where: { id: chatSession.id },
-            data: updates,
-          });
-        } catch (error) {
-          console.error("Failed to save response/session:", error);
-        }
-      }
-    },
-  });
-
-  // 10) Return streaming response with helpful headers for the client
-  const response = new StreamingTextResponse(responseStream);
-  response.headers.set("X-Session-ID", chatSession.id);
-  response.headers.set("X-Is-New-Session", String(isNewSession));
-  response.headers.set("X-Model-Used", effectiveModelKey);
-  response.headers.set("X-Title-Updated", String(shouldUpdateTitle));
-  return response;
-}
-  
-/* --------------------------------- GET ---------------------------------- */
-export async function GET(request: Request) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const action = searchParams.get("action") || "info";
-
-    let rateLimitType: "chat_sessions" | "default" = "default";
-    if (action === "sessions" || action === "session") {
-      rateLimitType = "chat_sessions";
-    }
-
-    switch (action) {
-      case "sessions": {
-        const authResult = await handleAuthAndRateLimit(request, rateLimitType);
-        if (!authResult.success) return authResult.error;
-
-        const { user } = authResult;
-        const limit = Math.min(parseInt(searchParams.get("limit") || "50"), 100);
-        const archived = searchParams.get("archived") === "true";
-
-        const sessions = await prismadb.chatSession.findMany({
-          where: { userId: user.id, isArchived: archived },
-          orderBy: [{ isPinned: "desc" }, { lastMessageAt: "desc" }],
-          take: limit,
-          select: {
-            id: true,
-            title: true,
-            lastMessageAt: true,
-            messageCount: true,
-            isPinned: true,
-            isArchived: true,
-            modelKey: true,
-            createdAt: true,
-          },
-        });
-
-        return NextResponse.json({
-          sessions,
-          total: sessions.length,
-          cached: false,
-          timestamp: new Date().toISOString(),
-        });
-      }
-
-      case "session": {
-        const authResult = await handleAuthAndRateLimit(request, rateLimitType);
-        if (!authResult.success) return authResult.error;
-
-        const { user } = authResult;
-        const sessionId = searchParams.get("sessionId");
-        if (!sessionId) {
-          return NextResponse.json({ error: "Session ID required" }, { status: 400 });
-        }
-
-        const session = await prismadb.chatSession.findFirst({
-          where: { id: sessionId, userId: user.id },
-          include: {
-            chatMessages: {
-              orderBy: { createdAt: "asc" },
-              select: {
-                id: true,
-                content: true,
-                role: true,
-                createdAt: true,
-                modelUsed: true,
-                executionTime: true,
-                dbQueryUsed: true,
-                contextSources: true,
-              },
-            },
-          },
-        });
-
-        if (!session) {
-          return NextResponse.json({ error: "Session not found" }, { status: 404 });
-        }
-
-        return NextResponse.json({ session, timestamp: new Date().toISOString() });
-      }
-
-      case "models": {
-        const models = Object.entries(AVAILABLE_MODELS).map(([key, config]) => ({
-          id: key,
-          name: config.name,
-          temperature: config.temperature,
-          contextWindow: config.contextWindow,
-        }));
-        return NextResponse.json({ models, total: models.length });
-      }
-
-      case "health": {
-        return NextResponse.json({
-          status: "healthy",
-          timestamp: new Date().toISOString(),
-          services: { database: "operational", ai_agent: "operational" },
-        });
-      }
-
-      default:
-        return NextResponse.json({
-          api_info: {
-            name: "Enhanced Session-Based Chat API",
-            version: "4.2",
-            description:
-              "Session-based conversational AI with rate limiting and session creation",
-          },
-        });
-    }
-  } catch (error: any) {
-    return createErrorResponse(error);
-  }
-}
-
-/* --------------------------------- PUT ---------------------------------- */
-export async function PUT(request: Request) {
-  try {
-    const authResult = await handleAuthAndRateLimit(request, "update_session");
-    if (!authResult.success) return authResult.error;
-
-    const { user } = authResult;
-    const body = await request.json();
-    const {
-      sessionId,
-      title,
-      isPinned,
-      isArchived,
-      modelKey,
-      temperature,
-      useDatabase,
-      useKnowledgeBase,
-    } = body;
-
-    if (!sessionId) {
-      return NextResponse.json({ error: "Session ID required" }, { status: 400 });
-    }
-
-    const session = await prismadb.chatSession.findFirst({
-      where: { id: sessionId, userId: user.id },
+      userName: user.firstName || user.username || 'User',
+      sessionId: session.id,
     });
-    if (!session) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
 
-    const updatedSession = await prismadb.chatSession.update({
-      where: { id: sessionId },
+    // Save user message
+    await prismadb.chatMessage.create({
       data: {
-        ...(title !== undefined && { title }),
-        ...(isPinned !== undefined && { isPinned }),
-        ...(isArchived !== undefined && { isArchived }),
-        ...(modelKey !== undefined && { modelKey }),
-        ...(temperature !== undefined && { temperature }),
-        ...(useDatabase !== undefined && { useDatabase }),
-        ...(useKnowledgeBase !== undefined && { useKnowledgeBase }),
-        updatedAt: new Date(),
+        id: uuidv4(),
+        content: userMessage,
+        role: 'USER',
+        sessionId: session.id,
+        userId: user.id,
       },
     });
 
-    return NextResponse.json({ session: updatedSession });
+    // Save assistant response with source references
+    const assistantMessage = await prismadb.chatMessage.create({
+      data: {
+        id: uuidv4(),
+        content: agentResponse.content,
+        role: 'ASSISTANT',
+        sessionId: session.id,
+        userId: user.id,
+        modelUsed: agentResponse.model,
+        executionTime: agentResponse.executionTime,
+        dbQueryUsed: agentResponse.contexts.database?.success || false,
+        contextSources: agentResponse.metadata.contextSources.join(','),
+        // Store sources as JSON in a text field (you may want to create a separate sources table)
+        metadata: JSON.stringify({
+          sources: agentResponse.sources,
+          dbQuery: agentResponse.contexts.database?.sqlQuery,
+          rerankingApplied: agentResponse.metadata.rerankingApplied,
+        }),
+      },
+    });
+
+    // Update session title if it's a new session or still has default title
+    if (isNewSession || session.title === 'New Chat') {
+      const smartTitle = await generateSmartTitle(userMessage, agentResponse.sources);
+      await prismadb.chatSession.update({
+        where: { id: sessionId },
+        data: {
+          title: smartTitle,
+          lastMessageAt: new Date(),
+        },
+      });
+      titleUpdated = true;
+    } else {
+      // Just update last message timestamp
+      await prismadb.chatSession.update({
+        where: { id: sessionId },
+        data: { lastMessageAt: new Date() },
+      });
+    }
+
+    // Create enhanced response
+    const response = NextResponse.json({
+      content: agentResponse.content,
+      sources: agentResponse.sources,
+      metadata: {
+        ...agentResponse.metadata,
+        sessionId,
+        messageId: assistantMessage.id,
+      },
+      performance: {
+        executionTime: agentResponse.executionTime,
+        model: agentResponse.model,
+      },
+    });
+
+    // Set enhanced headers
+    setEnhancedAgentResponseHeaders(response, agentResponse, sessionId, isNewSession, titleUpdated);
+
+    return response;
+
   } catch (error: any) {
-    return createErrorResponse(error);
+    console.error('Chat API error:', error);
+    return createErrorResponse(error, 500);
   }
 }
 
-/* -------------------------------- DELETE -------------------------------- */
-export async function DELETE(request: Request) {
+export async function GET(request: NextRequest) {
   try {
-    const authResult = await handleAuthAndRateLimit(request, "delete_session");
-    if (!authResult.success) return authResult.error;
+    const { user, success, error } = await handleAuthAndRateLimit(request);
+    if (!success || !user) return error!;
 
-    const { user } = authResult;
     const { searchParams } = new URL(request.url);
-    const sessionId = searchParams.get("sessionId");
-    const archive = searchParams.get("archive") === "true";
+    const action = searchParams.get('action');
 
-    if (!sessionId) {
-      return NextResponse.json({ error: "Session ID required" }, { status: 400 });
+    if (action === 'sessions') {
+      const archived = searchParams.get('archived') === 'true';
+
+      const sessions = await prismadb.chatSession.findMany({
+        where: {
+          userId: user.id,
+          isArchived: archived,
+        },
+        orderBy: [
+          { isPinned: 'desc' },
+          { lastMessageAt: 'desc' },
+        ],
+        include: {
+          _count: { select: { messages: true } },
+        },
+      });
+
+      const formattedSessions = sessions.map(session => ({
+        id: session.id,
+        title: session.title,
+        lastMessageAt: session.lastMessageAt?.toISOString() || session.createdAt.toISOString(),
+        messageCount: session._count.messages,
+        isPinned: session.isPinned,
+        isArchived: session.isArchived,
+        modelKey: session.modelKey,
+        createdAt: session.createdAt.toISOString(),
+      }));
+
+      return NextResponse.json({ sessions: formattedSessions });
     }
 
-    const session = await prismadb.chatSession.findFirst({
+    if (action === 'session') {
+      const sessionId = searchParams.get('sessionId');
+      if (!sessionId) {
+        return NextResponse.json({ error: 'Session ID required' }, { status: 400 });
+      }
+
+      const session = await prismadb.chatSession.findUnique({
+        where: { id: sessionId, userId: user.id },
+        include: {
+          messages: { orderBy: { createdAt: 'asc' } },
+        },
+      });
+
+      if (!session) {
+        return NextResponse.json({ error: 'Session not found' }, { status: 404 });
+      }
+
+      // Parse source references from stored metadata
+      const enhancedMessages = session.messages.map(message => {
+        let sources: SourceReference[] = [];
+
+        if (message.metadata) {
+          try {
+            const metadata = JSON.parse(message.metadata as string);
+            sources = metadata.sources || [];
+          } catch (error) {
+            console.warn('Failed to parse message metadata:', error);
+          }
+        }
+
+        return {
+          id: message.id,
+          content: message.content,
+          role: message.role,
+          createdAt: message.createdAt.toISOString(),
+          modelUsed: message.modelUsed,
+          executionTime: message.executionTime,
+          dbQueryUsed: message.dbQueryUsed,
+          contextSources: message.contextSources,
+          sources: message.role === 'ASSISTANT' ? sources : undefined,
+        };
+      });
+
+      const formattedSession = {
+        id: session.id,
+        title: session.title,
+        chatMessages: enhancedMessages,
+        modelKey: session.modelKey,
+        useDatabase: session.useDatabase,
+        useKnowledgeBase: session.useKnowledgeBase,
+        temperature: session.temperature,
+        isPinned: session.isPinned,
+        isArchived: session.isArchived,
+        lastMessageAt: session.lastMessageAt?.toISOString(),
+      };
+
+      return NextResponse.json({ session: formattedSession });
+    }
+
+    if (action === 'models') {
+      // Return available models (this would come from your config)
+      const models = [
+        "MFDoom/deepseek-r1-tool-calling:7b",
+        "deepseek-r1:8b",
+        "llama3.2:3b",
+        "llama3.2:8b",
+        "qwen2.5-coder:7b-instruct",
+        "mistral:7b"
+      ];
+
+      return NextResponse.json({ models });
+    }
+
+    return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+
+  } catch (error: any) {
+    console.error('Chat GET API error:', error);
+    return createErrorResponse(error, 500);
+  }
+}
+
+export async function PUT(request: NextRequest) {
+  try {
+    const { user, success, error } = await handleAuthAndRateLimit(request);
+    if (!success || !user) return error!;
+
+    const body = await request.json();
+    const { sessionId, ...updates } = body;
+
+    if (!sessionId) {
+      return NextResponse.json({ error: 'Session ID required' }, { status: 400 });
+    }
+
+    const session = await prismadb.chatSession.update({
       where: { id: sessionId, userId: user.id },
+      data: updates,
     });
-    if (!session) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
+
+    return NextResponse.json({ session });
+
+  } catch (error: any) {
+    console.error('Chat PUT API error:', error);
+    return createErrorResponse(error, 500);
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const { user, success, error } = await handleAuthAndRateLimit(request);
+    if (!success || !user) return error!;
+
+    const { searchParams } = new URL(request.url);
+    const sessionId = searchParams.get('sessionId');
+    const archive = searchParams.get('archive') === 'true';
+
+    if (!sessionId) {
+      return NextResponse.json({ error: 'Session ID required' }, { status: 400 });
     }
 
     if (archive) {
+      // Archive the session
       await prismadb.chatSession.update({
-        where: { id: sessionId },
+        where: { id: sessionId, userId: user.id },
         data: { isArchived: true },
       });
-      return NextResponse.json({ message: "Session archived successfully", sessionId });
     } else {
-      await prismadb.chatSession.delete({ where: { id: sessionId } });
-      return NextResponse.json({ message: "Session deleted successfully", sessionId });
+      // Delete the session and its messages
+      await prismadb.chatMessage.deleteMany({
+        where: { sessionId, userId: user.id },
+      });
+
+      await prismadb.chatSession.delete({
+        where: { id: sessionId, userId: user.id },
+      });
     }
+
+    return NextResponse.json({ success: true });
+
   } catch (error: any) {
-    return createErrorResponse(error);
+    console.error('Chat DELETE API error:', error);
+    return createErrorResponse(error, 500);
   }
-}
-
-/* ------------------------------- Helpers -------------------------------- */
-function generateSessionTitle(firstMessage: string): string {
-  const cleanMessage = firstMessage
-    .trim()
-    .replace(/\n+/g, " ")
-    .replace(/\s+/g, " ")
-    .substring(0, 50);
-  return cleanMessage.length < firstMessage.trim().length
-    ? `${cleanMessage}...`
-    : cleanMessage;
-}
-
-function generateBetterSessionTitle(userMessage: string, assistantResponse: string): string {
-  return generateSessionTitle(userMessage);
 }

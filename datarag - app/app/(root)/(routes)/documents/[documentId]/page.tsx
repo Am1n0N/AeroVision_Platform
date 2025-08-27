@@ -12,7 +12,7 @@ interface DocumentIdPageProps {
 const DocumentIdPage = async ({params}:DocumentIdPageProps) => {
 
     const {userId} = auth();
-    
+
     if (!userId){
         return redirectToSignIn();
     }
@@ -20,7 +20,7 @@ const DocumentIdPage = async ({params}:DocumentIdPageProps) => {
     const document = await prismadb.document.findUnique({
         where: {
             id: params.documentId,
-            createdBy: userId
+            userId: userId
         }
     });
 

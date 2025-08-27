@@ -38,7 +38,7 @@ const ChatIdPage = async ({params}:ChatIdPageProps) => {
 
     return (
     <div className="flex justify-center align-middle h-full w-full">
-    <PDFViewer remoteUrl={document.fileurl} />
+    <PDFViewer remoteUrl={document.fileUrl} />
     <ChatClient document={document} />
     </div>
 

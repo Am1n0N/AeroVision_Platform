@@ -4,7 +4,7 @@ import { SearchInput } from "@/components/search-input";
 import prismadb from "@/lib/prismadb";
 
 interface RootPageProps {
-  searchParams:{
+  searchParams: {
     categoryId: string;
     name: string;
     displayMode: string;
@@ -28,9 +28,9 @@ const RootPage = async ({
 
   return (
     <div className="h-full p-4 space-y-2">
-      <SearchInput/>
+      <SearchInput />
       <Categories data={categories} />
-      <Documents data={documents} displayMode={searchParams.displayMode}/>
+      <Documents data={documents} displayMode={searchParams.displayMode} />
     </div>
   )
 }

@@ -28,7 +28,7 @@ import {
 
 // App config
 import { AVAILABLE_MODELS, type ModelKey } from "@/config/models";
-import { DATABASE_KEYWORDS, isDatabaseQuery } from "@/lib/database-detection";
+import { isDatabaseQuery } from "@/lib/database-detection";
 
 /* -----------------------------------------------------------------------------
  * Embedding config
@@ -130,6 +130,37 @@ export interface AgentResponse {
   };
 }
 
+export interface SourceReference {
+  id: string;
+  type: 'database' | 'document' | 'knowledge_base' | 'conversation' | 'similar_chat';
+  title: string;
+  section?: string;
+  pageNumber?: number;
+  snippet: string;
+  relevanceScore?: number;
+  metadata?: Record<string, any>;
+  url?: string;
+  timestamp?: string;
+}
+
+export interface EnhancedAgentResponse extends Omit<AgentResponse, 'contexts'> {
+  content: string;
+  model: string;
+  executionTime: number;
+  sources: SourceReference[];
+  contexts: {
+    database?: DatabaseQueryResult & { sourceRef?: SourceReference };
+    knowledge?: string;
+    conversation?: string;
+    similar?: string;
+    rerankedResults?: RerankingResult[];
+  };
+  metadata: AgentResponse['metadata'] & {
+    sourceCount: number;
+    sourceTypes: string[];
+  };
+}
+
 export type DocumentKey = { documentName: string; modelName: string; userId: string; };
 export type GeneralChatKey = { modelName: string; userId: string; sessionId?: string };
 
@@ -193,7 +224,7 @@ Audience: business analysts and data scientists.
  * Default agent config
  * -------------------------------------------------------------------------- */
 const DEFAULT_CONFIG: Required<AgentConfig> = {
-  modelKey: "deepseek-r1:7b",
+  modelKey: "MFDoom/deepseek-r1-tool-calling:7b",
   temperature: 0.2,
   maxTokens: 4000,
   streaming: false,
@@ -418,27 +449,23 @@ class MemoryManager {
     }
     return { documents: docs.slice(0, topK), rerankingResults: [] as RerankingResult[] };
   }
-
   knowledgeBaseSearch(query: string, topK = 5, filters?: Record<string, any>, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
     return this.searchCore(MemoryManager.NS_KB, query, { topK, filters, useReranking, modelKey, threshold });
   }
-
   vectorSearch(query: string, documentNamespace: string, filterUserMessages: boolean, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
     const filters = filterUserMessages && this.cfg.enableMetadataFiltering ? { userMsg: true } : undefined;
     return this.searchCore(documentNamespace, query, { topK: 10, filters, useReranking, modelKey, threshold });
   }
-
   searchSimilarConversations(query: string, userId: string, topK = 3, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
     const ns = `${MemoryManager.NS_CHAT_PREFIX}-${userId}`;
     const filters = this.cfg.enableMetadataFiltering ? { userId } : undefined;
     return this.searchCore(ns, query, { topK, filters, useReranking, modelKey, threshold });
   }
-
   /* ---------- reranking ---------- */
   async rerankDocuments(
     query: string,
     documents: Document[],
-    modelKey: ModelKey = "deepseek-r1:7b",
+    modelKey: ModelKey = "MFDoom/deepseek-r1-tool-calling:7b",
     threshold = 0.5
   ): Promise<RerankingResult[]> {
     if (!documents.length) return [];
@@ -485,7 +512,6 @@ class MemoryManager {
       return documents.map((d, i) => ({ document: d, relevanceScore: 0.5, originalRank: i, newRank: i }));
     }
   }
-
   /* ---------- chat history (Redis + vectors) ---------- */
   private docKey(k: DocumentKey) {
     return `${k.documentName}-${k.modelName}-${k.userId}`;
@@ -493,7 +519,6 @@ class MemoryManager {
   private chatKey(k: GeneralChatKey) {
     return `${MemoryManager.NS_CHAT_PREFIX}-${k.userId}-${k.modelName}-${k.sessionId || "default"}`;
   }
-
   async writeToHistory(text: string, key: DocumentKey) {
     await this.redis.zadd(this.docKey(key), { score: Date.now(), member: text });
     try {
@@ -504,7 +529,6 @@ class MemoryManager {
       console.warn("Vector add failed (doc history):", e);
     }
   }
-
   async writeToGeneralChatHistory(text: string, key: GeneralChatKey) {
     await this.redis.zadd(this.chatKey(key), { score: Date.now(), member: text });
     try {
@@ -515,16 +539,14 @@ class MemoryManager {
       console.warn("Vector add failed (chat history):", e);
     }
   }
-
   async readLatestHistory(key: DocumentKey) {
     const res = await this.redis.zrange(this.docKey(key), 0, Date.now(), { byScore: true });
     return res.slice(-30).reverse().join("\n");
-    }
+  }
   async readLatestGeneralChatHistory(key: GeneralChatKey) {
     const res = await this.redis.zrange(this.chatKey(key), 0, Date.now(), { byScore: true });
     return res.slice(-30).reverse().join("\n");
   }
-
   /* ---------- convenience ---------- */
   async addToKnowledgeBase(content: string, metadata: Record<string, any> = {}) {
     try {
@@ -542,7 +564,7 @@ class MemoryManager {
  * Database Query Executor (trimmed but equivalent capability)
  * -------------------------------------------------------------------------- */
 class DatabaseQueryExecutor {
-  constructor(private modelKey: ModelKey, private withPerf = false) {}
+  constructor(private modelKey: ModelKey, private withPerf = false) { }
 
   private model(temp = 0.0) {
     return new ChatOllama({
@@ -705,23 +727,71 @@ SQL:`;
 export class AIAgent {
   private cfg: Required<AgentConfig>;
   private mm?: MemoryManager;
+  private debugMode: boolean;
+  private logger: (level: string, message: string, data?: any) => void;
 
   constructor(cfg: Partial<AgentConfig> = {}) {
     this.cfg = { ...DEFAULT_CONFIG, ...cfg };
+    this.debugMode = process.env.NODE_ENV === "development" || process.env.AGENT_DEBUG === "true";
+
+    // Initialize logger
+    this.logger = (level: string, message: string, data?: any) => {
+      if (!this.debugMode && level === 'debug') return;
+
+      const timestamp = new Date().toISOString();
+      const logData = data ? JSON.stringify(data, null, 2) : '';
+
+      console.log(`[${timestamp}] [AIAgent:${level.toUpperCase()}] ${message}`);
+      if (logData) {
+        console.log(`[${timestamp}] [AIAgent:DATA]`, data);
+      }
+    };
+
+    this.logger('info', 'AIAgent initialized', {
+      modelKey: this.cfg.modelKey,
+      useMemory: this.cfg.useMemory,
+      useDatabase: this.cfg.useDatabase,
+      useKnowledgeBase: this.cfg.useKnowledgeBase,
+      useReranking: this.cfg.useReranking,
+      debugMode: this.debugMode
+    });
   }
 
   /* ---------- init & model ---------- */
   private async initMemory() {
-    if (this.cfg.useMemory && !this.mm) this.mm = await MemoryManager.getInstance();
+    this.logger('debug', 'Initializing memory manager...');
+    const start = Date.now();
+
+    if (this.cfg.useMemory && !this.mm) {
+      this.mm = await MemoryManager.getInstance();
+      this.logger('info', 'Memory manager initialized', {
+        initTime: Date.now() - start,
+        instance: !!this.mm
+      });
+    } else if (!this.cfg.useMemory) {
+      this.logger('debug', 'Memory disabled in config');
+    } else {
+      this.logger('debug', 'Memory manager already initialized');
+    }
   }
 
   private model(opts?: { forceStreaming?: boolean }) {
+    const streaming = opts?.forceStreaming ?? this.cfg.streaming;
+
+    this.logger('debug', 'Creating model instance', {
+      model: this.cfg.modelKey,
+      temperature: this.cfg.temperature,
+      streaming,
+      contextWindow: this.cfg.contextWindow,
+      baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434"
+    });
+
     const m = AVAILABLE_MODELS[this.cfg.modelKey];
     return new ChatOllama({
       baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
       model: this.cfg.modelKey,
       temperature: this.cfg.temperature,
-      streaming: opts?.forceStreaming ?? this.cfg.streaming,
+      streaming,
       keepAlive: "10m",
       numCtx: this.cfg.contextWindow,
     });
@@ -729,14 +799,34 @@ export class AIAgent {
 
   /* ---------- auth ---------- */
   async authenticate(request: Request): Promise<{ user: any; rateLimitOk: boolean }> {
-    const user = await currentUser();
-    if (!user?.id) throw new Error("Authentication required");
-    const identifier = `${request.url}-${user.id}`;
-    const { success } = await rateLimit(identifier);
-    return { user, rateLimitOk: success };
+    this.logger('debug', 'Authenticating request', { url: request.url });
+    const start = Date.now();
+
+    try {
+      const user = await currentUser();
+      if (!user?.id) {
+        this.logger('warn', 'Authentication failed - no user ID');
+        throw new Error("Authentication required");
+      }
+
+      const identifier = `${request.url}-${user.id}`;
+      const { success } = await rateLimit(identifier);
+
+      this.logger('info', 'Authentication completed', {
+        userId: user.id,
+        rateLimitOk: success,
+        authTime: Date.now() - start,
+        identifier: identifier.substring(0, 50) + '...' // Truncate for privacy
+      });
+
+      return { user, rateLimitOk: success };
+    } catch (error) {
+      this.logger('error', 'Authentication failed', { error: error.message });
+      throw error;
+    }
   }
 
-  /* ---------- shared context builder ---------- */
+  /* ---------- context builder - modified to only cite KB sources ---------- */
   private async buildContextsAndPrompt(opts: {
     message: string;
     userName?: string;
@@ -745,34 +835,103 @@ export class AIAgent {
     documentMeta?: { id: string; title: string; description?: string };
     enableDB: boolean;
   }) {
+    const buildStart = Date.now();
+    this.logger('info', 'Building contexts and prompt', {
+      messageLength: opts.message.length,
+      userName: opts.userName,
+      sessionId: opts.sessionId,
+      hasAdditionalContext: !!opts.additionalContext,
+      hasDocumentMeta: !!opts.documentMeta,
+      enableDB: opts.enableDB
+    });
+
     const { message, userName, sessionId, additionalContext, documentMeta, enableDB } = opts;
 
-    const dbDetection = isDatabaseQuery(message);
+    // Database detection
+    const dbDetectionStart = Date.now();
+    const dbDetection = await isDatabaseQuery(message);
+    this.logger('debug', 'Database query detection completed', {
+      isDbQuery: dbDetection.isDbQuery,
+      confidence: dbDetection.confidence,
+      detectionTime: Date.now() - dbDetectionStart
+    });
+
     const shouldQueryDB = this.cfg.useDatabase && enableDB && dbDetection.isDbQuery;
 
-    const ctxs: AgentResponse["contexts"] = {};
+    const ctxs: EnhancedAgentResponse["contexts"] = {};
+    const sources: SourceReference[] = [];
+    const citableSources: SourceReference[] = [];
     let rerankingApplied = false;
     const allReranked: RerankingResult[] = [];
 
     const tasks: Promise<void>[] = [];
+    const taskTimings: Record<string, number> = {};
 
+    // Database query - NO citations (data context only)
     if (shouldQueryDB) {
+      this.logger('info', 'Queuing database query task');
       tasks.push(
         (async () => {
+          const taskStart = Date.now();
           try {
+            this.logger('debug', 'Executing database query...');
             const exec = new DatabaseQueryExecutor(this.cfg.modelKey, false);
-            ctxs.database = await exec.executeQuery(message);
+            const dbResult = await exec.executeQuery(message);
+            (ctxs as any).database = dbResult;
+
+            this.logger('info', 'Database query completed', {
+              success: dbResult.success,
+              sqlQuery: dbResult.sqlQuery,
+              dataLength: dbResult.data?.length || 0,
+              summary: dbResult.summary?.substring(0, 100) + '...',
+              executionTime: Date.now() - taskStart
+            });
+
+            if (dbResult.success && dbResult.data?.length) {
+              const sourceRef: SourceReference = {
+                id: `db-${Date.now()}`,
+                type: "database",
+                title: "Live Database Query",
+                section: `SQL: ${dbResult.sqlQuery}`,
+                snippet: dbResult.summary || `${dbResult.data.length} rows returned`,
+                relevanceScore: 1.0,
+                metadata: {
+                  sqlQuery: dbResult.sqlQuery,
+                  rowCount: dbResult.data.length,
+                  queryComplexity: dbResult.performance?.queryComplexity,
+                },
+                timestamp: new Date().toISOString(),
+              };
+              sources.push(sourceRef);
+              (ctxs as any).database.sourceRef = sourceRef;
+
+              this.logger('debug', 'Database source reference created', {
+                sourceId: sourceRef.id,
+                rowCount: sourceRef.metadata.rowCount
+              });
+            }
           } catch (e) {
+            this.logger('error', 'Database query failed', { error: e.message, stack: e.stack });
             console.warn("DB query failed", e);
+          } finally {
+            taskTimings.database = Date.now() - taskStart;
           }
         })()
       );
     }
 
+    // Knowledge base search - CITABLE sources
     if (this.cfg.useKnowledgeBase && this.mm) {
+      this.logger('info', 'Queuing knowledge base search task');
       tasks.push(
         (async () => {
+          const taskStart = Date.now();
           try {
+            this.logger('debug', 'Searching knowledge base...', {
+              useReranking: this.cfg.useReranking,
+              rerankingThreshold: this.cfg.rerankingThreshold
+            });
+
             const search = await this.mm!.knowledgeBaseSearch(
               message,
               5,
@@ -781,27 +940,115 @@ export class AIAgent {
               this.cfg.modelKey,
               this.cfg.rerankingThreshold
             );
-            ctxs.knowledge = search.documents.map((d) => d.pageContent).join("\n---\n").slice(0, 4000);
-            if (search.rerankingResults.length) {
-              allReranked.push(...search.rerankingResults);
-              rerankingApplied = true;
+
+            this.logger('info', 'Knowledge base search completed', {
+              documentsFound: search.documents.length,
+              rerankingResults: search.rerankingResults.length,
+              executionTime: Date.now() - taskStart
+            });
+
+            if (search.documents.length > 0) {
+              const contextContent = search.documents.map((d) => d.pageContent).join("\n---\n").slice(0, 4000);
+              (ctxs as any).knowledge = contextContent;
+
+              this.logger('debug', 'Knowledge context created', {
+                originalLength: search.documents.map(d => d.pageContent).join("\n---\n").length,
+                truncatedLength: contextContent.length
+              });
+
+              // Add KB sources as CITABLE references
+              search.documents.forEach((doc, index) => {
+                const sourceRef: SourceReference = {
+                  id: `kb-${Date.now()}-${index}`,
+                  type: "knowledge_base",
+                  title: doc.metadata?.title || doc.metadata?.documentId || "Knowledge Base Entry",
+                  section: doc.metadata?.chunkType || "Content",
+                  pageNumber: doc.metadata?.pageNumber,
+                  snippet: doc.pageContent.slice(0, 200) + "...",
+                  relevanceScore: doc.metadata?.searchScore || 0.8,
+                  metadata: {
+                    documentId: doc.metadata?.documentId,
+                    chunkIndex: doc.metadata?.chunkIndex,
+                    wordCount: doc.metadata?.wordCount,
+                  },
+                  timestamp: doc.metadata?.processingTimestamp,
+                };
+                sources.push(sourceRef);
+                citableSources.push(sourceRef);
+
+                this.logger('debug', 'KB source reference created', {
+                  sourceId: sourceRef.id,
+                  title: sourceRef.title,
+                  relevanceScore: sourceRef.relevanceScore
+                });
+              });
+
+              if (search.rerankingResults.length) {
+                allReranked.push(...search.rerankingResults);
+                rerankingApplied = true;
+                this.logger('debug', 'Reranking applied to KB results', {
+                  rerankingCount: search.rerankingResults.length
+                });
+              }
             }
           } catch (e) {
+            this.logger('error', 'Knowledge base search failed', { error: e.message, stack: e.stack });
             console.warn("KB search failed", e);
+          } finally {
+            taskTimings.knowledgeBase = Date.now() - taskStart;
           }
         })()
       );
     }
 
-    // Conversation & Similar (general chat or document)
+    // Document and conversation search
     if (this.cfg.useMemory && this.mm) {
+      this.logger('info', 'Queuing memory search task', {
+        hasDocumentMeta: !!documentMeta
+      });
+
       tasks.push(
         (async () => {
+          const taskStart = Date.now();
           try {
             if (!documentMeta) {
-              // General chat
-              const gk: GeneralChatKey = { userId: userName || "user", modelName: this.cfg.modelKey, sessionId: sessionId || "default" };
-              ctxs.conversation = await this.mm!.readLatestGeneralChatHistory(gk);
+              this.logger('debug', 'Processing general chat context...');
+
+              // General chat - conversation history (not citable)
+              const gk: GeneralChatKey = {
+                userId: userName || "user",
+                modelName: this.cfg.modelKey,
+                sessionId: sessionId || "default",
+              };
+
+              (ctxs as any).conversation = await this.mm!.readLatestGeneralChatHistory(gk);
+
+              this.logger('debug', 'General chat history loaded', {
+                hasHistory: !!(ctxs as any).conversation,
+                historyLength: (ctxs as any).conversation ? String((ctxs as any).conversation).length : 0
+              });
+
+              if ((ctxs as any).conversation) {
+                const sourceRef: SourceReference = {
+                  id: `conv-${Date.now()}`,
+                  type: "conversation",
+                  title: "Current Conversation",
+                  section: "Chat History",
+                  snippet: String((ctxs as any).conversation).slice(0, 200) + "...",
+                  relevanceScore: 0.8,
+                  metadata: {
+                    sessionId: gk.sessionId,
+                    modelName: gk.modelName,
+                  },
+                };
+                sources.push(sourceRef);
+                this.logger('debug', 'Conversation source reference created', {
+                  sourceId: sourceRef.id
+                });
+              }
+
+              // Similar conversations search
+              this.logger('debug', 'Searching similar conversations...');
               const similar = await this.mm!.searchSimilarConversations(
                 message,
                 gk.userId,
@@ -810,20 +1057,68 @@ export class AIAgent {
                 this.cfg.modelKey,
                 this.cfg.rerankingThreshold
               );
-              ctxs.similar = similar.documents
+
+              const similarConvs = similar.documents
                 ?.filter((d: any) => d.metadata?.chatSession !== gk.sessionId)
                 .map((d) => d.pageContent)
                 .join("\n---\n")
                 .slice(0, 1500);
+
+              (ctxs as any).similar = similarConvs;
+
+              this.logger('debug', 'Similar conversations processed', {
+                totalFound: similar.documents?.length || 0,
+                filteredCount: similar.documents?.filter((d: any) => d.metadata?.chatSession !== gk.sessionId).length || 0,
+                finalLength: similarConvs.length
+              });
+
+              // Track similar conversation sources
+              similar.documents?.forEach((doc, index) => {
+                if (doc.metadata?.chatSession !== gk.sessionId) {
+                  const sourceRef: SourceReference = {
+                    id: `similar-${Date.now()}-${index}`,
+                    type: "similar_chat",
+                    title: "Similar Conversation",
+                    section: `Session: ${doc.metadata?.chatSession || "Unknown"}`,
+                    snippet: doc.pageContent.slice(0, 200) + "...",
+                    relevanceScore: doc.metadata?.searchScore,
+                    metadata: {
+                      chatSession: doc.metadata?.chatSession,
+                      timestamp: doc.metadata?.timestamp,
+                    },
+                  };
+                  sources.push(sourceRef);
+                }
+              });
+
               if (similar.rerankingResults.length) {
                 allReranked.push(...similar.rerankingResults);
                 rerankingApplied = true;
+                this.logger('debug', 'Reranking applied to similar conversations', {
+                  rerankingCount: similar.rerankingResults.length
+                });
               }
             } else {
-              // Document chat
-              const dk: DocumentKey = { documentName: documentMeta.id, userId: userName || "user", modelName: this.cfg.modelKey };
-              ctxs.conversation = await this.mm!.readLatestHistory(dk);
+              this.logger('debug', 'Processing document chat context...', {
+                documentId: documentMeta.id,
+                documentTitle: documentMeta.title
+              });
 
+              // Document chat - document content IS citable
+              const dk: DocumentKey = {
+                documentName: documentMeta.id,
+                userId: userName || "user",
+                modelName: this.cfg.modelKey,
+              };
+
+              // Load conversation history
+              (ctxs as any).conversation = await this.mm!.readLatestHistory(dk);
+              this.logger('debug', 'Document chat history loaded', {
+                hasHistory: !!(ctxs as any).conversation
+              });
+
+              // Document content search - CITABLE
+              this.logger('debug', 'Searching document content...');
               const rel = await this.mm!.vectorSearch(
                 message,
                 documentMeta.id,
@@ -832,83 +1127,223 @@ export class AIAgent {
                 this.cfg.modelKey,
                 this.cfg.rerankingThreshold
               );
-              ctxs.knowledge = rel.documents?.map((d) => d.pageContent).join("\n") || "";
-              if (rel.rerankingResults.length) {
-                allReranked.push(...rel.rerankingResults);
-                rerankingApplied = true;
+
+              this.logger('info', 'Document content search completed', {
+                documentsFound: rel.documents.length,
+                rerankingResults: rel.rerankingResults.length
+              });
+
+              if (rel.documents.length > 0) {
+                (ctxs as any).knowledge = rel.documents?.map((d) => d.pageContent).join("\n") || "";
+
+                // Add document sections as CITABLE sources
+                rel.documents?.forEach((doc, index) => {
+                  const sourceRef: SourceReference = {
+                    id: `doc-${Date.now()}-${index}`,
+                    type: "document",
+                    title: documentMeta.title,
+                    section: doc.metadata?.chunkType || "Section",
+                    pageNumber: doc.metadata?.pageNumber,
+                    snippet: doc.pageContent.slice(0, 200) + "...",
+                    relevanceScore: doc.metadata?.searchScore || 0.7,
+                    metadata: {
+                      documentId: documentMeta.id,
+                      chunkIndex: doc.metadata?.chunkIndex,
+                      processingTimestamp: doc.metadata?.processingTimestamp,
+                    },
+                  };
+                  sources.push(sourceRef);
+                  citableSources.push(sourceRef);
+
+                  this.logger('debug', 'Document source reference created', {
+                    sourceId: sourceRef.id,
+                    title: sourceRef.title,
+                    pageNumber: sourceRef.pageNumber,
+                    relevanceScore: sourceRef.relevanceScore
+                  });
+                });
+
+                if (rel.rerankingResults.length) {
+                  allReranked.push(...rel.rerankingResults);
+                  rerankingApplied = true;
+                  this.logger('debug', 'Reranking applied to document results', {
+                    rerankingCount: rel.rerankingResults.length
+                  });
+                }
               }
 
+              // Similar document content - context only
+              this.logger('debug', 'Searching similar document content...');
               const sim = await this.mm!.vectorSearch(
-                ctxs.conversation || "",
+                (ctxs as any).conversation || "",
                 documentMeta.id,
                 true,
                 this.cfg.useReranking,
                 this.cfg.modelKey,
                 this.cfg.rerankingThreshold
               );
+
               const simText = sim.documents?.map((d) => d.pageContent).join("\n") || "";
-              ctxs.similar = simText;
+              (ctxs as any).similar = simText;
+
+              this.logger('debug', 'Similar document content processed', {
+                documentsFound: sim.documents?.length || 0,
+                contentLength: simText.length
+              });
+
               if (sim.rerankingResults.length) {
                 allReranked.push(...sim.rerankingResults);
-                rerankingApplied = true;
+                this.logger('debug', 'Additional reranking applied to similar document content', {
+                  rerankingCount: sim.rerankingResults.length
+                });
               }
             }
           } catch (e) {
+            this.logger('error', 'Memory operations failed', { error: e.message, stack: e.stack });
             console.warn("Memory ops failed", e);
+          } finally {
+            taskTimings.memory = Date.now() - taskStart;
           }
         })()
       );
     }
 
+    this.logger('debug', 'Waiting for all context tasks to complete...');
     await Promise.all(tasks);
 
-    // Truncate contexts to fit
-    const truncated = this.truncateContexts(ctxs, this.cfg.maxContextLength);
-    if (allReranked.length) truncated.rerankedResults = allReranked;
+    this.logger('info', 'All context tasks completed', {
+      taskTimings,
+      totalTaskTime: Math.max(...Object.values(taskTimings))
+    });
 
-    // Build prompt
+    // Truncate contexts
+    const preTruncationSizes = Object.entries(ctxs).reduce((acc, [key, value]) => {
+      acc[key] = typeof value === 'string' ? value.length : JSON.stringify(value).length;
+      return acc;
+    }, {} as Record<string, number>);
+
+    const truncated = this.truncateContexts(ctxs, this.cfg.maxContextLength);
+
+    const postTruncationSizes = Object.entries(truncated).reduce((acc, [key, value]) => {
+      acc[key] = typeof value === 'string' ? value.length : JSON.stringify(value).length;
+      return acc;
+    }, {} as Record<string, number>);
+
+    this.logger('debug', 'Context truncation completed', {
+      preTruncation: preTruncationSizes,
+      postTruncation: postTruncationSizes,
+      maxContextLength: this.cfg.maxContextLength
+    });
+
+    if (allReranked.length) (truncated as any).rerankedResults = allReranked;
+
+    // Build system prompt with proper citation mapping
+    const promptStart = Date.now();
     const header = documentMeta
-      ? `${SYSTEM_PROMPTS.documentChat}\nTitle: ${documentMeta.title}\nDescription: ${documentMeta.description || ""}\nUser: ${userName || "User"}\nReranking: ${rerankingApplied ? "Yes" : "No"}`
-      : `${SYSTEM_PROMPTS.chat}\nUser: ${userName || "User"}\nDetection: ${(dbDetection.confidence * 100).toFixed(1)}% db-related\nReranking: ${rerankingApplied ? "Yes" : "No"}`;
+      ? `${SYSTEM_PROMPTS.documentChat}\nTitle: ${documentMeta.title}\nDescription: ${documentMeta.description || ""
+      }\nUser: ${userName || "User"}\nReranking: ${rerankingApplied ? "Yes" : "No"}`
+      : `${SYSTEM_PROMPTS.chat}\nUser: ${userName || "User"}\nDetection: ${(
+        dbDetection.confidence * 100
+      ).toFixed(1)}% db-related\nReranking: ${rerankingApplied ? "Yes" : "No"}`;
 
     let systemPrompt = header;
 
+    // Add citable sources with clear numbering
+    if (citableSources.length > 0) {
+      this.logger('info', 'Adding citable sources to prompt', {
+        citableSourcesCount: citableSources.length,
+        sourceTypes: citableSources.map(s => s.type)
+      });
+
+      systemPrompt += `\n\nCITABLE SOURCE REFERENCES:\n`;
+      citableSources.forEach((source, index) => {
+        systemPrompt += `[${index + 1}] ${source.type.toUpperCase()}: ${source.title}`;
+        if (source.section) systemPrompt += ` - ${source.section}`;
+        if (source.pageNumber) systemPrompt += ` (Page ${source.pageNumber})`;
+        systemPrompt += `\n`;
+      });
+
+      systemPrompt += `\nCITATION REQUIREMENTS:
+- Use [1], [2], [3], etc. to cite the numbered sources above
+- ONLY cite knowledge base entries and document content - these are factual sources
+- DO NOT cite conversation history, chat context, or database results
+- Each factual claim should reference the appropriate numbered source
+- If no citable sources support your answer, don't use citations\n`;
+    } else {
+      this.logger('info', 'No citable sources available');
+      systemPrompt += `\n\nNO CITABLE SOURCES AVAILABLE - Answer based on your knowledge without citations.\n`;
+    }
+
+    // Add context content with clear labeling
     if (!documentMeta) {
-      if (truncated.database?.success && truncated.database.data?.length) {
-        const sample = truncated.database.data.slice(0, 5);
-        const summarySafe = String(truncated.database.summary || "").slice(0, 1200);
+      if ((truncated as any).database?.success && (truncated as any).database.data?.length) {
+        const sample = (truncated as any).database.data.slice(0, 5);
+        const summarySafe = String((truncated as any).database.summary || "").slice(0, 1200);
         systemPrompt += `
 
-LIVE DATABASE RESULTS:
-SQL: ${truncated.database.sqlQuery}
-Rows: ${truncated.database.data.length}
+LIVE DATABASE RESULTS (USE FOR CONTEXT - DO NOT CITE):
+SQL: ${(truncated as any).database.sqlQuery}
+Rows: ${(truncated as any).database.data.length}
 Sample: ${JSON.stringify(sample, null, 2).slice(0, 1800)}
 Business Summary: ${summarySafe}
 
-Use these real numbers in the answer.`;
-      } else if (truncated.database?.error && shouldQueryDB) {
-        systemPrompt += `
+Use these real numbers in your answer but do not cite them with [#] references.`;
 
-DATABASE QUERY ATTEMPTED:
-SQL: ${truncated.database.sqlQuery || "n/a"}
-Error: ${truncated.database.error}
-Give general guidance if possible.`;
+        this.logger('debug', 'Database context added to prompt', {
+          sqlQuery: (truncated as any).database.sqlQuery,
+          rowCount: (truncated as any).database.data.length,
+          sampleSize: sample.length,
+          summaryLength: summarySafe.length
+        });
       }
     }
 
-    if (truncated.knowledge) systemPrompt += `\n\nRELEVANT${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.knowledge}`;
-    if (truncated.similar) systemPrompt += `\n\nRELATED${rerankingApplied ? " (RERANKED)" : ""}:\n${truncated.similar}`;
-    if (truncated.conversation) systemPrompt += `\n\nHISTORY:\n${truncated.conversation}`;
-    if (additionalContext) systemPrompt += `\n\nADDITIONAL:\n${additionalContext}`;
-    if (!documentMeta && !truncated.database && shouldQueryDB) systemPrompt += `\n\nSCHEMA:\n${DATABASE_SCHEMA}`;
+    if ((truncated as any).knowledge) {
+      systemPrompt += `\n\nRELEVANT KNOWLEDGE CONTENT${rerankingApplied ? " (RERANKED)" : ""} (CITABLE WITH [#]):\n${(truncated as any).knowledge}`;
+      this.logger('debug', 'Knowledge content added to prompt', {
+        contentLength: (truncated as any).knowledge.length,
+        reranked: rerankingApplied
+      });
+    }
+
+    if ((truncated as any).similar) {
+      systemPrompt += `\n\nRELATED CONTENT${rerankingApplied ? " (RERANKED)" : ""} (CONTEXT ONLY - DO NOT CITE):\n${(truncated as any).similar}`;
+      this.logger('debug', 'Similar content added to prompt', {
+        contentLength: (truncated as any).similar.length,
+        reranked: rerankingApplied
+      });
+    }
+
+    if ((truncated as any).conversation) {
+      systemPrompt += `\n\nCONVERSATION HISTORY (CONTEXT ONLY - DO NOT CITE):\n${(truncated as any).conversation}`;
+      this.logger('debug', 'Conversation history added to prompt', {
+        contentLength: (truncated as any).conversation.length
+      });
+    }
+
+    if (additionalContext) {
+      systemPrompt += `\n\nADDITIONAL CONTEXT (DO NOT CITE):\n${additionalContext}`;
+      this.logger('debug', 'Additional context added to prompt', {
+        contentLength: additionalContext.length
+      });
+    }
+
     systemPrompt += `\n\nQuestion: ${message.trim()}`;
 
-    const sources = [
-      truncated.database ? "database" : null,
-      truncated.knowledge ? (documentMeta ? "document" : "knowledge") : null,
-      truncated.conversation ? "history" : null,
-      truncated.similar ? "similar" : null,
-    ].filter(Boolean) as string[];
+    const sourceTypes = [...new Set(sources.map((s) => s.type))];
+
+    this.logger('info', 'Context building completed', {
+      totalBuildTime: Date.now() - buildStart,
+      promptBuildTime: Date.now() - promptStart,
+      systemPromptLength: systemPrompt.length,
+      shouldQueryDB,
+      dbConfidence: dbDetection.confidence,
+      rerankingApplied,
+      totalSources: sources.length,
+      citableSources: citableSources.length,
+      sourceTypes,
+      tokenCountEst: systemPrompt.length
+    });
 
     return {
       shouldQueryDB,
@@ -917,43 +1352,107 @@ Give general guidance if possible.`;
       truncated,
       rerankingApplied,
       sources,
-      tokenCountEst: systemPrompt.length, // simple estimate
+      citableSources,
+      sourceTypes,
+      tokenCountEst: systemPrompt.length,
     };
   }
 
+  /* ---------- truncation ---------- */
   private truncateContexts(contexts: any, maxLength: number) {
+    this.logger('debug', 'Starting context truncation', { maxLength });
+
     const t = { ...contexts };
     let total = 0;
-    Object.values(t).forEach((c: any) => {
-      if (typeof c === "string") total += c.length;
-      else if (c?.summary) total += String(c.summary).length;
+    const contextSizes: Record<string, number> = {};
+
+    Object.entries(t).forEach(([key, value]: [string, any]) => {
+      let size = 0;
+      if (typeof value === "string") {
+        size = value.length;
+      } else if (value?.summary) {
+        size = String(value.summary).length;
+      }
+      contextSizes[key] = size;
+      total += size;
     });
-    if (total <= maxLength) return t;
+
+    this.logger('debug', 'Context sizes before truncation', {
+      contextSizes,
+      total,
+      exceedsLimit: total > maxLength
+    });
+
+    if (total <= maxLength) {
+      this.logger('debug', 'No truncation needed');
+      return t;
+    }
 
     const priorities = ["database", "knowledge", "conversation", "similar"] as const;
     const target = Math.floor(maxLength * 0.9);
 
+    this.logger('debug', 'Truncating contexts', { target, priorities });
+
     for (const k of priorities) {
-      if (typeof t[k] === "string") {
-        const text = t[k] as string;
+      if (typeof (t as any)[k] === "string") {
+        const text = (t as any)[k] as string;
         const allowance = Math.max(200, Math.floor(target * 0.3));
+
         if (text.length > allowance) {
+          const originalLength = text.length;
           const sentences = text.split(/[.!?]+/);
           let acc = "";
+
           for (const s of sentences) {
-            if ((acc + s + ".").length <= allowance) acc += s + ".";
-            else break;
+            if ((acc + s + ".").length <= allowance) {
+              acc += s + ".";
+            } else {
+              break;
+            }
           }
-          t[k] = acc || text.slice(0, allowance);
+
+          (t as any)[k] = acc || text.slice(0, allowance);
+
+          this.logger('debug', `Truncated context: ${k}`, {
+            originalLength,
+            allowance,
+            newLength: (t as any)[k].length,
+            sentences: sentences.length,
+            usedSentences: acc.split(/[.!?]+/).length - 1
+          });
         }
       }
     }
+
+    // Log final sizes
+    const finalSizes = Object.entries(t).reduce((acc, [key, value]) => {
+      acc[key] = typeof value === 'string' ? value.length : JSON.stringify(value).length;
+      return acc;
+    }, {} as Record<string, number>);
+
+    this.logger('debug', 'Context truncation completed', {
+      originalSizes: contextSizes,
+      finalSizes,
+      totalReduction: total - Object.values(finalSizes).reduce((sum, size) => sum + size, 0)
+    });
+
     return t;
   }
 
   /* ---------- responses ---------- */
-  async generateChatResponse(message: string, ctx: AgentContext, additionalContext?: string): Promise<AgentResponse> {
-    const start = Date.now();
+  async generateChatResponse(
+    message: string,
+    ctx: AgentContext,
+    additionalContext?: string
+  ): Promise<EnhancedAgentResponse> {
+    const totalStart = Date.now();
+    this.logger('info', 'Generating chat response', {
+      messageLength: message.length,
+      userId: ctx.userId,
+      sessionId: ctx.sessionId,
+      hasAdditionalContext: !!additionalContext
+    });
+
     await this.initMemory();
 
     const prep = await this.buildContextsAndPrompt({
@@ -964,40 +1463,193 @@ Give general guidance if possible.`;
       enableDB: true,
     });
 
+    // Generate response
+    const modelStart = Date.now();
+    this.logger('debug', 'Invoking model for response generation');
+
     const resp = await this.model().invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
     const content = String(resp.content || "");
 
+    const modelTime = Date.now() - modelStart;
+    this.logger('info', 'Model response generated', {
+      responseLength: content.length,
+      modelTime,
+      hasContent: !!content
+    });
+
+    // Validate citations
+    const citationValidation = this.validateCitations(content, prep.citableSources);
+    this.logger('info', 'Citation validation completed', citationValidation);
+
+    // Log citation debug info
+    this.logCitationDebug(prep, content);
+
+    // Save to memory
+    const memoryStart = Date.now();
     if (this.cfg.useMemory && this.mm) {
-      const gk: GeneralChatKey = { userId: ctx.userId, modelName: this.cfg.modelKey, sessionId: ctx.sessionId };
+      this.logger('debug', 'Saving conversation to memory');
+
+      const gk: GeneralChatKey = {
+        userId: ctx.userId,
+        modelName: this.cfg.modelKey,
+        sessionId: ctx.sessionId
+      };
+
       await this.mm.writeToGeneralChatHistory(`User: ${message}\n`, gk);
+
       let save = `Assistant: ${content}`;
-      if (prep.truncated.database?.success && prep.truncated.database.sqlQuery) save += `\n[Query: ${prep.truncated.database.sqlQuery}]`;
+      if ((prep.truncated as any).database?.success && (prep.truncated as any).database.sqlQuery) {
+        save += `\n[Query: ${(prep.truncated as any).database.sqlQuery}]`;
+      }
+
       await this.mm.writeToGeneralChatHistory(save, gk);
+
+      this.logger('debug', 'Memory save completed', {
+        memoryTime: Date.now() - memoryStart,
+        savedContent: save.length
+      });
     }
+
+    const totalTime = Date.now() - totalStart;
+
+    this.logger('info', 'Chat response generation completed', {
+      totalExecutionTime: totalTime,
+      modelTime,
+      memoryTime: Date.now() - memoryStart,
+      responseLength: content.length,
+      citableSourcesCount: prep.citableSources.length,
+      validCitations: citationValidation.validCitations.length,
+      invalidCitations: citationValidation.invalidCitations.length
+    });
 
     return {
       content,
       model: this.cfg.modelKey,
-      executionTime: Date.now() - start,
+      executionTime: totalTime,
+      sources: prep.citableSources,
       contexts: prep.truncated,
       metadata: {
         sessionId: ctx.sessionId || "",
         dbQueryDetected: prep.shouldQueryDB,
         dbQueryConfidence: prep.dbConfidence,
-        contextSources: prep.sources,
+        contextSources: prep.sourceTypes,
         rerankingApplied: prep.rerankingApplied,
         totalContextTokens: prep.tokenCountEst + content.length,
+        sourceCount: prep.citableSources.length,
+        sourceTypes: prep.sourceTypes,
+        citationValidation,
       },
     };
   }
 
-  async generateDocumentResponse(message: string, ctx: AgentContext, documentContext?: string): Promise<AgentResponse> {
-    const start = Date.now();
-    await this.initMemory();
-    if (!ctx.documentId) throw new Error("Document ID required");
+  validateCitations(content: string, citableSources: SourceReference[]): {
+    validCitations: number[];
+    invalidCitations: number[];
+    totalCitationCount: number;
+  } {
+    this.logger('debug', 'Validating citations', {
+      contentLength: content.length,
+      citableSourcesCount: citableSources.length
+    });
 
-    const doc = await prismadb.document.findUnique({ where: { id: ctx.documentId }, include: { messages: true } });
-    if (!doc) throw new Error("Document not found");
+    // Extract all [#] citations from content
+    const citationMatches = content.match(/\[(\d+)\]/g) || [];
+    const citationNumbers = citationMatches.map(match => parseInt(match.replace(/[\[\]]/g, '')));
+
+    this.logger('debug', 'Citations extracted from content', {
+      citationMatches,
+      citationNumbers,
+      uniqueCitations: [...new Set(citationNumbers)]
+    });
+
+    const validCitations: number[] = [];
+    const invalidCitations: number[] = [];
+
+    citationNumbers.forEach(num => {
+      if (num >= 1 && num <= citableSources.length) {
+        validCitations.push(num);
+      } else {
+        invalidCitations.push(num);
+      }
+    });
+
+    const result = {
+      validCitations: [...new Set(validCitations)],
+      invalidCitations: [...new Set(invalidCitations)],
+      totalCitationCount: citationNumbers.length
+    };
+
+    this.logger('info', 'Citation validation results', result);
+
+    if (result.invalidCitations.length > 0) {
+      this.logger('warn', 'Invalid citations detected', {
+        invalidCitations: result.invalidCitations,
+        availableRange: `1-${citableSources.length}`
+      });
+    }
+
+    return result;
+  }
+
+  private logCitationDebug(prep: any, content: string) {
+    if (this.debugMode) {
+      const citationData = {
+        citableSourcesCount: prep.citableSources.length,
+        citableSources: prep.citableSources.map((s: any, i: number) => ({
+          index: i + 1,
+          type: s.type,
+          title: s.title,
+          relevanceScore: s.relevanceScore
+        })),
+        contentHasCitations: /\[\d+\]/.test(content),
+        extractedCitations: (content.match(/\[(\d+)\]/g) || []),
+        citationPattern: content.match(/\[\d+\]/g),
+        contextTypes: Object.keys(prep.truncated),
+        rerankingApplied: prep.rerankingApplied
+      };
+
+      this.logger('debug', 'Citation debug information', citationData);
+    }
+  }
+
+  async generateDocumentResponse(
+    message: string,
+    ctx: AgentContext,
+    documentContext?: string
+  ): Promise<EnhancedAgentResponse> {
+    const totalStart = Date.now();
+    this.logger('info', 'Generating document response', {
+      messageLength: message.length,
+      userId: ctx.userId,
+      documentId: ctx.documentId,
+      sessionId: ctx.sessionId,
+      hasDocumentContext: !!documentContext
+    });
+
+    await this.initMemory();
+    if (!ctx.documentId) {
+      this.logger('error', 'Document ID missing');
+      throw new Error("Document ID required");
+    }
+
+    // Load document metadata
+    const docLoadStart = Date.now();
+    const doc = await prismadb.document.findUnique({
+      where: { id: ctx.documentId },
+      include: { messages: true },
+    });
+
+    if (!doc) {
+      this.logger('error', 'Document not found', { documentId: ctx.documentId });
+      throw new Error("Document not found");
+    }
+
+    this.logger('info', 'Document loaded', {
+      documentId: doc.id,
+      title: doc.title,
+      messageCount: doc.messages.length,
+      loadTime: Date.now() - docLoadStart
+    });
 
     const prep = await this.buildContextsAndPrompt({
       message,
@@ -1008,41 +1660,118 @@ Give general guidance if possible.`;
       enableDB: false,
     });
 
+    // Generate response
+    const modelStart = Date.now();
+    this.logger('debug', 'Invoking model for document response generation');
+
     const resp = await this.model().invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
     const content = String(resp.content || "");
 
+    const modelTime = Date.now() - modelStart;
+    this.logger('info', 'Document model response generated', {
+      responseLength: content.length,
+      modelTime
+    });
+
+    // Validate citations
+    const citationValidation = this.validateCitations(content, prep.citableSources);
+    this.logCitationDebug(prep, content);
+
+    // Save to memory
+    const memoryStart = Date.now();
     if (this.cfg.useMemory && this.mm) {
-      const dk: DocumentKey = { documentName: doc.id, userId: ctx.userId, modelName: this.cfg.modelKey };
+      this.logger('debug', 'Saving document conversation to memory');
+
+      const dk: DocumentKey = {
+        documentName: doc.id,
+        userId: ctx.userId,
+        modelName: this.cfg.modelKey
+      };
+
       await this.mm.writeToHistory(`User: ${message}\n`, dk);
       await this.mm.writeToHistory(`System: ${content}`, dk);
+
+      this.logger('debug', 'Document memory save completed', {
+        memoryTime: Date.now() - memoryStart
+      });
     }
 
+    // Save to database
+    const dbSaveStart = Date.now();
     try {
       await prismadb.document.update({
         where: { id: ctx.documentId },
-        data: { messages: { createMany: { data: [{ content: message, role: "USER", userId: ctx.userId }, { content, role: "SYSTEM", userId: ctx.userId }] } } },
+        data: {
+          messages: {
+            createMany: {
+              data: [
+                { content: message, role: "USER", userId: ctx.userId },
+                { content, role: "SYSTEM", userId: ctx.userId },
+              ],
+            },
+          },
+        },
+      });
+
+      this.logger('debug', 'Messages saved to database', {
+        dbSaveTime: Date.now() - dbSaveStart,
+        documentId: ctx.documentId
       });
     } catch (e) {
+      this.logger('error', 'Failed to save messages to database', {
+        error: e.message,
+        documentId: ctx.documentId
+      });
       console.warn("save messages to db failed", e);
     }
+
+    const totalTime = Date.now() - totalStart;
+
+    this.logger('info', 'Document response generation completed', {
+      totalExecutionTime: totalTime,
+      modelTime,
+      memoryTime: Date.now() - memoryStart,
+      dbSaveTime: Date.now() - dbSaveStart,
+      responseLength: content.length,
+      citableSourcesCount: prep.citableSources.length,
+      validCitations: citationValidation.validCitations.length,
+      invalidCitations: citationValidation.invalidCitations.length
+    });
 
     return {
       content,
       model: this.cfg.modelKey,
-      executionTime: Date.now() - start,
+      executionTime: totalTime,
+      sources: prep.citableSources,
       contexts: prep.truncated,
       metadata: {
         sessionId: ctx.sessionId || ctx.documentId,
         dbQueryDetected: false,
         dbQueryConfidence: 0,
-        contextSources: prep.sources,
+        contextSources: prep.sourceTypes,
         rerankingApplied: prep.rerankingApplied,
         totalContextTokens: prep.tokenCountEst + content.length,
+        sourceCount: prep.citableSources.length,
+        sourceTypes: prep.sourceTypes,
+        citationValidation,
       },
     };
   }
 
-  async generateStreamingResponse(message: string, ctx: AgentContext, additionalContext?: string): Promise<ReadableStream> {
+  /* ---------- streaming ---------- */
+  async generateStreamingResponse(
+    message: string,
+    ctx: AgentContext,
+    additionalContext?: string
+  ): Promise<ReadableStream> {
+    const streamStart = Date.now();
+    this.logger('info', 'Starting streaming response generation', {
+      messageLength: message.length,
+      userId: ctx.userId,
+      sessionId: ctx.sessionId,
+      hasAdditionalContext: !!additionalContext
+    });
+
     await this.initMemory();
 
     const prep = await this.buildContextsAndPrompt({
@@ -1053,53 +1782,145 @@ Give general guidance if possible.`;
       enableDB: true,
     });
 
+    this.logger('debug', 'Context preparation completed for streaming', {
+      prepTime: Date.now() - streamStart,
+      systemPromptLength: prep.systemPrompt.length,
+      citableSourcesCount: prep.citableSources.length
+    });
+
     const model = this.model({ forceStreaming: true });
     const stream = await model.stream([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
 
     const mm = this.mm;
     const cfg = this.cfg;
-    const gk: GeneralChatKey = { userId: ctx.userId, modelName: this.cfg.modelKey, sessionId: ctx.sessionId };
+    const logger = this.logger;
+    const gk: GeneralChatKey = {
+      userId: ctx.userId,
+      modelName: this.cfg.modelKey,
+      sessionId: ctx.sessionId
+    };
 
-    if (cfg.useMemory && mm) await mm.writeToGeneralChatHistory(`User: ${message}\n`, gk);
+    if (cfg.useMemory && mm) {
+      this.logger('debug', 'Writing user message to memory for streaming');
+      await mm.writeToGeneralChatHistory(`User: ${message}\n`, gk);
+    }
+
+    let chunkCount = 0;
+    let totalContentLength = 0;
 
     return new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
         let buffer = "";
+        const streamProcessStart = Date.now();
+
+        logger('debug', 'Starting stream processing');
+
         try {
           for await (const chunk of stream) {
+            chunkCount++;
             const content = (chunk as any).content || "";
+
             if (content) {
               controller.enqueue(encoder.encode(content));
               buffer += content;
+              totalContentLength += content.length;
+
+              if (chunkCount % 10 === 0) { // Log every 10th chunk to avoid spam
+                logger('debug', 'Stream chunk processed', {
+                  chunkNumber: chunkCount,
+                  chunkLength: content.length,
+                  totalBufferLength: buffer.length
+                });
+              }
             }
           }
+
+          logger('info', 'Stream processing completed successfully', {
+            totalChunks: chunkCount,
+            totalContentLength,
+            streamProcessTime: Date.now() - streamProcessStart,
+            finalBufferLength: buffer.length
+          });
+
         } catch (err: any) {
+          logger('error', 'Stream processing failed', {
+            error: err.message,
+            stack: err.stack,
+            chunksProcessed: chunkCount,
+            contentReceived: totalContentLength
+          });
+
           const msg = `I hit an issue: ${err.message}. Please try again.`;
           controller.enqueue(encoder.encode(msg));
           buffer = msg;
         } finally {
           controller.close();
+
+          const memoryStart = Date.now();
           if (buffer.trim() && cfg.useMemory && mm) {
+            logger('debug', 'Saving streaming response to memory');
+
             let toSave = `Assistant: ${buffer.trim()}`;
-            if (prep.truncated.database?.success && prep.truncated.database.sqlQuery) toSave += `\n[Query: ${prep.truncated.database.sqlQuery}]`;
-            if (prep.rerankingApplied) toSave += `\n[Reranking applied: ${(prep.truncated.rerankedResults || []).length}]`;
+            if ((prep.truncated as any).database?.success && (prep.truncated as any).database.sqlQuery) {
+              toSave += `\n[Query: ${(prep.truncated as any).database.sqlQuery}]`;
+            }
+            if (prep.rerankingApplied) {
+              toSave += `\n[Reranking applied: ${((prep.truncated as any).rerankedResults || []).length}]`;
+            }
+
             await mm.writeToGeneralChatHistory(toSave, gk);
+
+            logger('debug', 'Streaming response saved to memory', {
+              memoryTime: Date.now() - memoryStart,
+              savedContentLength: toSave.length
+            });
+          }
+
+          // Validate citations for final response
+          if (buffer.trim()) {
+            const citationValidation = this.validateCitations(buffer, prep.citableSources);
+            logger('info', 'Final streaming response citation validation', {
+              ...citationValidation,
+              responseLength: buffer.length,
+              totalStreamTime: Date.now() - streamStart
+            });
           }
         }
       },
     });
   }
 
-  /* ---------- misc ---------- */
+  /* ---------- misc helpers ---------- */
   async executeQuery(query: string): Promise<DatabaseQueryResult> {
-    const exec = new DatabaseQueryExecutor(this.cfg.modelKey, true);
-    return exec.executeQuery(query);
+    this.logger('info', 'Executing database query', { queryLength: query.length });
+    const queryStart = Date.now();
+
+    try {
+      const exec = new DatabaseQueryExecutor(this.cfg.modelKey, true);
+      const result = await exec.executeQuery(query);
+
+      this.logger('info', 'Database query executed', {
+        success: result.success,
+        sqlQuery: result.sqlQuery,
+        dataLength: result.data?.length || 0,
+        executionTime: Date.now() - queryStart,
+        hasPerformanceData: !!result.performance
+      });
+
+      return result;
+    } catch (error) {
+      this.logger('error', 'Database query execution failed', {
+        error: error.message,
+        executionTime: Date.now() - queryStart
+      });
+      throw error;
+    }
   }
 
   getModelInfo() {
     const conf = AVAILABLE_MODELS[this.cfg.modelKey];
-    return {
+    const info = {
       id: this.cfg.modelKey,
       name: conf.name,
       temperature: this.cfg.temperature,
@@ -1116,11 +1937,24 @@ Give general guidance if possible.`;
         threshold: this.cfg.rerankingThreshold,
         maxContextLength: this.cfg.maxContextLength,
       },
+      debugMode: this.debugMode,
     };
+
+    this.logger('debug', 'Model info requested', info);
+    return info;
   }
 
   async performReranking(query: string, contexts: any[], threshold?: number): Promise<RerankingResult[]> {
+    this.logger('info', 'Performing reranking', {
+      queryLength: query.length,
+      contextCount: contexts.length,
+      threshold: threshold ?? this.cfg.rerankingThreshold
+    });
+
+    const rerankStart = Date.now();
+
     if (!this.mm) await this.initMemory();
+
     const docs = contexts.map(
       (c) =>
         new Document({
@@ -1128,10 +1962,112 @@ Give general guidance if possible.`;
           metadata: typeof c === "object" ? c.metadata || {} : {},
         })
     );
-    return this.mm!.rerankDocuments(query, docs, this.cfg.modelKey, threshold ?? this.cfg.rerankingThreshold);
+
+    this.logger('debug', 'Documents prepared for reranking', {
+      documentCount: docs.length,
+      avgPageContentLength: docs.reduce((sum, doc) => sum + doc.pageContent.length, 0) / docs.length
+    });
+
+    try {
+      const results = await this.mm!.rerankDocuments(
+        query,
+        docs,
+        this.cfg.modelKey,
+        threshold ?? this.cfg.rerankingThreshold
+      );
+
+      this.logger('info', 'Reranking completed', {
+        resultsCount: results.length,
+        executionTime: Date.now() - rerankStart,
+        avgRelevanceScore: results.length > 0
+          ? results.reduce((sum, r) => sum + (r.relevanceScore || 0), 0) / results.length
+          : 0
+      });
+
+      return results;
+    } catch (error) {
+      this.logger('error', 'Reranking failed', {
+        error: error.message,
+        executionTime: Date.now() - rerankStart
+      });
+      throw error;
+    }
+  }
+
+  // Debug helper methods
+  setDebugMode(enabled: boolean) {
+    this.debugMode = enabled;
+    this.logger('info', 'Debug mode changed', { debugMode: enabled });
+  }
+
+  getDebugInfo() {
+    return {
+      debugMode: this.debugMode,
+      config: this.cfg,
+      memoryManagerInitialized: !!this.mm,
+      modelInfo: this.getModelInfo()
+    };
+  }
+
+  // Performance monitoring
+  async healthCheck(): Promise<{
+    status: 'healthy' | 'degraded' | 'unhealthy';
+    checks: Record<string, { status: boolean; time?: number; error?: string }>;
+    timestamp: string;
+  }> {
+    this.logger('info', 'Starting health check');
+    const healthStart = Date.now();
+
+    const checks: Record<string, { status: boolean; time?: number; error?: string }> = {};
+
+    // Memory check
+    try {
+      const memStart = Date.now();
+      if (this.cfg.useMemory) {
+        await this.initMemory();
+        checks.memory = { status: true, time: Date.now() - memStart };
+      } else {
+        checks.memory = { status: true, time: 0 };
+      }
+    } catch (error) {
+      checks.memory = { status: false, error: error.message };
+    }
+
+    // Model check
+    try {
+      const modelStart = Date.now();
+      const model = this.model();
+      checks.model = { status: true, time: Date.now() - modelStart };
+    } catch (error) {
+      checks.model = { status: false, error: error.message };
+    }
+
+    // Database check (if enabled)
+    if (this.cfg.useDatabase) {
+      try {
+        const dbStart = Date.now();
+        await isDatabaseQuery("test query");
+        checks.database = { status: true, time: Date.now() - dbStart };
+      } catch (error) {
+        checks.database = { status: false, error: error.message };
+      }
+    }
+
+    const failedChecks = Object.values(checks).filter(check => !check.status).length;
+    const status = failedChecks === 0 ? 'healthy' :
+                  failedChecks <= 1 ? 'degraded' : 'unhealthy';
+
+    const result = {
+      status,
+      checks,
+      timestamp: new Date().toISOString(),
+      totalHealthCheckTime: Date.now() - healthStart
+    };
+
+    this.logger('info', 'Health check completed', result);
+    return result;
   }
 }
-
 /* -----------------------------------------------------------------------------
  * Factories & helpers (same names, slimmer bodies)
  * -------------------------------------------------------------------------- */
@@ -1142,7 +2078,7 @@ export const createDocumentAgent = (config?: Partial<AgentConfig>) =>
   new AIAgent({ useMemory: true, useDatabase: false, useKnowledgeBase: false, useReranking: true, ...config });
 
 export const createDatabaseAgent = (config?: Partial<AgentConfig>) =>
-  new AIAgent({ useMemory: false, useDatabase: true, useKnowledgeBase: false, useReranking: false, temperature: 0.0, modelKey: "deepseek-r1:7b", ...config });
+  new AIAgent({ useMemory: false, useDatabase: true, useKnowledgeBase: false, useReranking: false, temperature: 0.0, modelKey: "MFDoom/deepseek-r1-tool-calling:7b", ...config });
 
 export class ModernEmbeddingIntegration {
   private mm: MemoryManager;
@@ -1192,31 +2128,78 @@ export function createErrorResponse(error: any, status = 500): NextResponse {
   return NextResponse.json({ error: msg, timestamp: new Date().toISOString() }, { status });
 }
 
-export function setAgentResponseHeaders(response: any, agentResponse: AgentResponse): void {
-  const dev = process.env.NODE_ENV === "development";
-  response.headers.set("X-Session-ID", agentResponse.metadata.sessionId);
-  response.headers.set("X-Model-Used", agentResponse.model);
-  response.headers.set("X-Processing-Time", `${agentResponse.executionTime}ms`);
-  response.headers.set("X-DB-Query-Detected", String(agentResponse.metadata.dbQueryDetected));
-  response.headers.set("X-DB-Confidence", `${(agentResponse.metadata.dbQueryConfidence * 100).toFixed(1)}%`);
-  response.headers.set("X-Context-Sources", agentResponse.metadata.contextSources.join(","));
-  response.headers.set("X-Reranking-Applied", String(agentResponse.metadata.rerankingApplied));
-  if (dev && agentResponse.metadata.totalContextTokens) {
-    response.headers.set("X-Total-Context-Tokens", String(agentResponse.metadata.totalContextTokens));
-  }
-  if (dev && agentResponse.contexts.database?.success) {
-    response.headers.set("X-Database-Query-Used", "true");
-    response.headers.set("X-Results-Count", String(agentResponse.contexts.database.data?.length || 0));
-  }
-  if (dev && agentResponse.contexts.rerankedResults?.length) {
-    const avg =
-      agentResponse.contexts.rerankedResults.reduce((s, r) => s + r.relevanceScore, 0) /
-      agentResponse.contexts.rerankedResults.length;
-    response.headers.set("X-Reranked-Results-Count", String(agentResponse.contexts.rerankedResults.length));
-    response.headers.set("X-Avg-Relevance-Score", avg.toFixed(3));
-  }
+function toAsciiHeaderValue(value: string): string {
+  // Replace CR/LF with spaces, convert non-ASCII chars to safe alternatives
+  return value
+    .replace(/[\r\n]+/g, " ")
+    .replace(/[""]/g, '"')        // Smart quotes to regular quotes
+    .replace(/['']/g, "'")        // Smart apostrophes to regular apostrophes
+    .replace(/[–—]/g, "-")        // Em/en dashes to hyphens
+    .replace(/[^\x20-\x7E]/g, "") // Remove any remaining non-ASCII chars
+    .trim()
+    .slice(0, 200); // Limit header length to prevent issues
 }
 
+export function setAgentResponseHeaders(response: any, agentResponse: EnhancedAgentResponse): void {
+  const dev = process.env.NODE_ENV === "development";
+
+  try {
+    response.headers.set("X-Session-ID", toAsciiHeaderValue(agentResponse.metadata.sessionId));
+    response.headers.set("X-Model-Used", toAsciiHeaderValue(agentResponse.model));
+    response.headers.set("X-Processing-Time", toAsciiHeaderValue(`${agentResponse.executionTime}ms`));
+    response.headers.set("X-DB-Query-Detected", toAsciiHeaderValue(String(agentResponse.metadata.dbQueryDetected)));
+    response.headers.set("X-DB-Confidence", toAsciiHeaderValue(`${(agentResponse.metadata.dbQueryConfidence * 100).toFixed(1)}%`));
+    response.headers.set("X-Context-Sources", toAsciiHeaderValue(agentResponse.metadata.contextSources.join(",")));
+    response.headers.set("X-Reranking-Applied", toAsciiHeaderValue(String(agentResponse.metadata.rerankingApplied)));
+
+    // Safe serialization for source-related headers
+    response.headers.set("X-Citable-Sources-Count", toAsciiHeaderValue(String(agentResponse.sources?.length || 0)));
+
+    // Create safe source type list
+    const sourceTypes = agentResponse.sources?.map(s => s.type).join(",") || "";
+    response.headers.set("X-Source-Types", toAsciiHeaderValue(sourceTypes));
+
+    if (dev) {
+      // Validate citations in the response
+      const agent = new AIAgent();
+      const citationValidation = agent.validateCitations(agentResponse.content, agentResponse.sources || []);
+
+      response.headers.set("X-Total-Citations", toAsciiHeaderValue(String(citationValidation.totalCitationCount)));
+      response.headers.set("X-Valid-Citations", toAsciiHeaderValue(citationValidation.validCitations.join(",")));
+      response.headers.set("X-Invalid-Citations", toAsciiHeaderValue(citationValidation.invalidCitations.join(",")));
+
+      if (agentResponse.metadata.totalContextTokens) {
+        response.headers.set("X-Total-Context-Tokens", toAsciiHeaderValue(String(agentResponse.metadata.totalContextTokens)));
+      }
+    }
+
+    if (dev && agentResponse.contexts?.database?.success) {
+      response.headers.set("X-Database-Query-Used", "true");
+      response.headers.set("X-Results-Count", String(agentResponse.contexts.database.data?.length || 0));
+    }
+
+    if (dev && agentResponse.contexts?.rerankedResults?.length) {
+      const avg = agentResponse.contexts.rerankedResults.reduce((s, r) => s + r.relevanceScore, 0) / agentResponse.contexts.rerankedResults.length;
+      response.headers.set("X-Reranked-Results-Count", String(agentResponse.contexts.rerankedResults.length));
+      response.headers.set("X-Avg-Relevance-Score", avg.toFixed(3));
+    }
+
+    // Add safe source titles for debugging (dev only)
+    if (dev && agentResponse.sources?.length > 0) {
+      const safeTitles = agentResponse.sources
+        .slice(0, 3) // Limit to first 3 sources
+        .map(s => toAsciiHeaderValue(s.title))
+        .join("|");
+      response.headers.set("X-Source-Titles", safeTitles);
+    }
+
+  } catch (error) {
+    console.warn("Failed to set some response headers:", error);
+    // Set minimal safe headers
+    response.headers.set("X-Model-Used", agentResponse.model || "unknown");
+    response.headers.set("X-Processing-Time", `${agentResponse.executionTime || 0}ms`);
+  }
+}
 /* -----------------------------------------------------------------------------
  * Validators (same API)
  * -------------------------------------------------------------------------- */
@@ -1273,7 +2256,7 @@ export const validateDatabaseRequest = (body: any) => {
   return {
     question: body.question?.trim(),
     directQuery: body.directQuery?.trim(),
-    model: body.model || "deepseek-r1:7b",
+    model: body.model || "MFDoom/deepseek-r1-tool-calling:7b",
     returnRawData: !!body.returnRawData,
     errors,
   };

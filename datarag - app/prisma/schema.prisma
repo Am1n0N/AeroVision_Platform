@@ -1,151 +1,244 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
-  previewFeatures = ["fullTextSearch", "fullTextIndex"]
 }
 
 datasource db {
   provider = "mysql"
   url      = env("DATABASE_URL")
-  relationMode = "prisma"
+}
+
+model ChatSession {
+  id               String    @id @default(cuid())
+  title            String
+  userId           String
+  modelKey         String    @default("deepseek-r1:7b")
+  useDatabase      Boolean   @default(true)
+  useKnowledgeBase Boolean   @default(true)
+  temperature      Float     @default(0.2)
+  isPinned         Boolean   @default(false)
+  isArchived       Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  lastMessageAt    DateTime?
+
+  // Relations
+  messages ChatMessage[]
+
+  @@index([userId, isArchived, isPinned])
+  @@index([userId, lastMessageAt])
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id             String   @id @default(cuid())
+  content        String   @db.Text
+  role           String // USER, ASSISTANT, SYSTEM
+  sessionId      String
+  userId         String
+  modelUsed      String?
+  executionTime  Int?
+  dbQueryUsed    Boolean  @default(false)
+  contextSources String?
+  metadata       String?  @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relations
+  session ChatSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sources MessageSource[]
+
+  @@index([sessionId, createdAt])
+  @@index([userId, createdAt])
+  @@map("chat_messages")
+}
+
+model MessageSource {
+  id             String    @id @default(cuid())
+  messageId      String
+  type           String
+  title          String
+  section        String?
+  pageNumber     Int?
+  snippet        String    @db.Text
+  relevanceScore Float?
+  url            String?
+  metadata       String?   @db.Text
+  timestamp      DateTime?
+  createdAt      DateTime  @default(now())
+
+  // Relations
+  message ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([type])
+  @@map("message_sources")
 }
 
 model Category {
-  id        String   @id @default(uuid())
-  name      String
-  createdAt DateTime @default(now())
+  id        String     @id @default(uuid())
+  name      String     @unique
+  createdAt DateTime   @default(now())
   documents Document[]
+
+  @@index([name])
 }
 
-// PDF documents
 model Document {
-  id        String   @id @default(uuid())
-  title     String   @db.Text
-  description String @db.Text
-  fileurl     String
-
-  createdBy String
-
-  category  Category @relation(fields: [categoryId], references: [id])
-  categoryId String
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  messages Message[]
-
-  @@index([categoryId])
-  @@fulltext([title])
-}
-
-// Chat Sessions - like Claude/ChatGPT
-model ChatSession {
-  id          String   @id @default(uuid())
-  title       String   @db.Text
+  id          String   @id @default(cuid())
+  title       String
+  description String?  @db.Text
+  fileUrl     String?  @db.Text
   userId      String
-  modelKey    String   @default("deepseek-r1:7b")
+  status      String   @default("PROCESSING") // PROCESSING, COMPLETED, ERROR
+  errorReason String?  @db.Text // Store error details if processing fails
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  // Session metadata
-  isArchived  Boolean  @default(false)
-  isPinned    Boolean  @default(false)
-  lastMessageAt DateTime @default(now())
-  messageCount  Int    @default(0)
-
-  // AI Agent configuration for this session
-  useDatabase       Boolean @default(true)
-  useKnowledgeBase  Boolean @default(true)
-  temperature       Float   @default(0.2)
-  maxTokens         Int     @default(4000)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
+  category   Category          @relation(fields: [categoryId], references: [id])
+  categoryId String
   // Relations
-  chatMessages ChatMessage[]
+  messages   DocumentMessage[]
+  chunks     DocumentChunk[]
 
   @@index([userId])
-  @@index([lastMessageAt])
-  @@index([userId, lastMessageAt])
-  @@fulltext([title])
+  @@index([categoryId])
+  @@index([status])
+  @@index([userId, status])
+  @@index([createdAt])
+  @@map("documents")
 }
 
-// General chat messages (separate from document-based messages)
-model ChatMessage {
-  id        String   @id @default(uuid())
-  content   String   @db.LongText
-  role      MessageRole
-
-  // Message metadata
-  modelUsed    String?
-  executionTime Int?     // in milliseconds
-  tokensUsed   Int?
-
-  // Context information
-  dbQueryUsed     Boolean @default(false)
-  dbQuery         String? @db.Text
-  dbResultCount   Int?
-  contextSources  String? // JSON array of context sources used
-
-  // Relations
-  sessionId String
-  userId    String
-  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([sessionId])
-  @@index([userId])
-  @@index([sessionId, createdAt])
-}
-
-enum MessageRole {
-  USER
-  ASSISTANT
-  SYSTEM
-}
-
-// Document-based messages (keep existing functionality)
-model Message {
-  id        String   @id @default(uuid())
-  role     Role     @default(USER)
-  content  String  @db.Text
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
+model DocumentMessage {
+  id         String   @id @default(cuid())
+  content    String   @db.Text
+  role       String   // USER, ASSISTANT, SYSTEM
   documentId String
-  userId String
+  userId     String
+  createdAt  DateTime @default(now())
+
+  // Relations
   document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, createdAt])
+  @@index([userId])
+  @@map("document_messages")
+}
+
+model DocumentChunk {
+  id            String   @id @default(cuid())
+  documentId    String
+  content       String   @db.Text
+  chunkIndex    Int
+  pageNumber    Int?
+  chunkType     String?  @default("text")
+  wordCount     Int?
+  tokenEstimate Int?
+  vectorId      String?  @unique // Make unique for better indexing
+  metadata      String?  @db.Text
+  createdAt     DateTime @default(now())
+
+  // Relations
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
   @@index([documentId])
+  @@index([chunkIndex])
+  @@index([vectorId])
+  @@index([documentId, chunkIndex])
+  @@map("document_chunks")
 }
 
-enum Role {
-  USER
-  SYSTEM
-}
-
-// User preferences and settings
-model UserSettings {
-  id     String @id @default(uuid())
-  userId String @unique
-
-  // Default AI preferences
-  defaultModel      String @default("deepseek-r1:7b")
-  defaultTemperature Float @default(0.2)
-  useDatabase       Boolean @default(true)
-  useKnowledgeBase  Boolean @default(true)
-
-  // UI preferences
-  theme             String @default("system") // light, dark, system
-  sidebarCollapsed  Boolean @default(false)
-  showTokenCount    Boolean @default(false)
-  showExecutionTime Boolean @default(false)
-
+// ==========================================
+// Enhanced Knowledge Base with Better Indexing
+// ==========================================
+model KnowledgeBaseEntry {
+  id        String   @id @default(cuid())
+  title     String   @db.VarChar(500)
+  content   String   @db.Text
+  category  String?  @db.VarChar(100)
+  userId    String?
+  isPublic  Boolean  @default(true)
+  vectorId  String?  @unique // Make unique for better vector search
+  metadata  String?  @db.Text
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // Relations
+  tags KnowledgeBaseTag[] @relation("EntryTags")
+
+  @@index([category])
+  @@index([userId])
+  @@index([isPublic])
+  @@index([userId, isPublic])
+  @@index([category, isPublic])
+  @@index([createdAt])
+  @@fulltext([title, content]) // Enable full-text search
+  @@map("knowledge_base_entries")
+}
+
+model KnowledgeBaseTag {
+  id   String @id @default(cuid())
+  name String @unique @db.VarChar(50)
+
+  // Relations
+  entries KnowledgeBaseEntry[] @relation("EntryTags")
+
+  @@index([name])
+  @@map("knowledge_base_tags")
+}
+
+model QueryHistory {
+  id            String   @id @default(cuid())
+  userId        String
+  sessionId     String?
+  query         String   @db.Text
+  sqlGenerated  String?  @db.Text
+  success       Boolean
+  resultCount   Int?
+  executionTime Int?
+  errorMessage  String?  @db.Text
+  context       String?  @db.Text
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+  @@index([sessionId])
+  @@index([success])
+  @@index([createdAt])
+  @@index([userId, success])
+  @@map("query_history")
+}
+
+model UserSettings {
+  id                   String   @id @default(cuid())
+  userId               String   @unique
+  defaultModel         String   @default("deepseek-r1:7b")
+  defaultTemperature   Float    @default(0.2)
+  useDatabase          Boolean  @default(true)
+  useKnowledgeBase     Boolean  @default(true)
+  theme                String   @default("system")
+  sidebarCollapsed     Boolean  @default(false)
+  showTokenCount       Boolean  @default(false)
+  showExecutionTime    Boolean  @default(false)
+  showSourceReferences Boolean  @default(true)
+  maxContextLength     Int      @default(6000)
+  rerankingThreshold   Float    @default(0.5)
+  enableReranking      Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([userId])
+  @@map("user_settings")
+}
+
+model AnalyticsEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  eventType String   @db.VarChar(100)
+  sessionId String?
+  metadata  String?  @db.Text
+  timestamp DateTime @default(now())
+
+  @@index([userId, eventType])
+  @@index([timestamp])
+  @@index([eventType, timestamp])
+  @@map("analytics_events")
 }

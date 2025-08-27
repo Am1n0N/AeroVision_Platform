@@ -9,7 +9,7 @@ export async function PATCH(req: Request ,
         const body = await req.json()
         const user = await currentUser()
 
-        const { title, description, fileurl, categoryId } = body
+        const { title, description, fileUrl, categoryId } = body
 
         if(!params.documentId){
             return new NextResponse(
@@ -25,7 +25,7 @@ export async function PATCH(req: Request ,
             )
         }
 
-        if (!title || !description || !fileurl || !categoryId){
+        if (!title || !description || !fileUrl || !categoryId){
             return new NextResponse(
                 "Missing required fields",
                 {status: 400}
@@ -36,12 +36,12 @@ export async function PATCH(req: Request ,
                 title,
                 description,
                 categoryId,
-                fileurl,
-                createdBy: user.id
+                fileUrl,
+                userId: user.id
             },
             where: {
                 id: params.documentId,
-                createdBy: user.id
+                userId: user.id
             }
         });
         return NextResponse.json(document);
@@ -59,7 +59,7 @@ export async function PATCH(req: Request ,
 }
 
 export async function DELETE(
-    request: Request,  
+    request: Request,
     { params }: {params: {documentId: string}}
     ){
     try{
@@ -82,7 +82,7 @@ export async function DELETE(
         const document = await prismadb.document.delete({
             where: {
             id: params.documentId,
-            createdBy: userId}
+            userId: userId}
         });
 
         return NextResponse.json(document);

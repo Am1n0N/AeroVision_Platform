@@ -1,4 +1,4 @@
-// components/ChatInterface.tsx - Dark-mode + grayscale only
+// components/ChatInterface.tsx - Enhanced with source references display
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   MessageCircle,
@@ -15,11 +15,47 @@ import {
   Search,
   X,
   Edit3,
-  Trash2
+  Trash2,
+  ExternalLink,
+  FileText,
+  MessageSquare,
+  Zap,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  Check
 } from 'lucide-react';
+import MessageRenderer from './MessageRenderer';
+import SettingsPanel from "@/components/SettingsPanel";
+import { useUserSettings } from "@/hooks/useChat";
+// Enhanced message type to include sources
+interface EnhancedChatMessage {
+  id: string;
+  content: string;
+  role: 'USER' | 'ASSISTANT' | 'SYSTEM';
+  createdAt: string;
+  modelUsed?: string;
+  executionTime?: number;
+  dbQueryUsed?: boolean;
+  contextSources?: string;
+  sources?: SourceReference[];
+}
+
+interface SourceReference {
+  id: string;
+  type: 'database' | 'document' | 'knowledge_base' | 'conversation' | 'similar_chat';
+  title: string;
+  section?: string;
+  pageNumber?: number;
+  snippet: string;
+  relevanceScore?: number;
+  metadata?: Record<string, any>;
+  url?: string;
+  timestamp?: string;
+}
 
 interface ChatInterfaceProps {
-  chat: any; // Using any for now, you can type this properly
+  chat: any;
   settings: any;
 }
 
@@ -30,6 +66,23 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
   const [showArchived, setShowArchived] = useState(false);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [showDropdown, setShowDropdown] = useState<string | null>(null);
+  const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
+  const [copiedText, setCopiedText] = useState<string>('');
+
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  // get the updater (we’ll keep your existing `settings` prop for initial render)
+  const { updateSettings: updateUserSettings, fetchSettings: fetchUserSettings } = useUserSettings();
+
+  // ensure we pull server settings once the page is mounted (optional but helpful)
+  useEffect(() => { fetchUserSettings({ force: false }); }, [fetchUserSettings]);
+
+  // keep sidebarCollapsed in sync with the prop on mount
+  useEffect(() => {
+    setSidebarCollapsed(settings.sidebarCollapsed || false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
   // Refs for DOM elements
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -150,6 +203,69 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
     setShowArchived(newArchiveState);
   }, []);
 
+  const toggleSourceExpansion = (messageId: string) => {
+    setExpandedSources(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(messageId)) {
+        newSet.delete(messageId);
+      } else {
+        newSet.add(messageId);
+      }
+      return newSet;
+    });
+  };
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedText(text);
+      setTimeout(() => setCopiedText(''), 2000);
+    } catch (err) {
+      console.error('Failed to copy text: ', err);
+    }
+  };
+
+  const getSourceIcon = (type: SourceReference['type']) => {
+    switch (type) {
+      case 'database':
+        return <Database size={14} className="text-blue-500" />;
+      case 'document':
+        return <FileText size={14} className="text-green-500" />;
+      case 'knowledge_base':
+        return <Book size={14} className="text-purple-500" />;
+      case 'conversation':
+        return <MessageSquare size={14} className="text-orange-500" />;
+      case 'similar_chat':
+        return <MessageCircle size={14} className="text-gray-500" />;
+      default:
+        return <Zap size={14} className="text-gray-400" />;
+    }
+  };
+
+  const getSourceTypeLabel = (type: SourceReference['type']) => {
+    switch (type) {
+      case 'database':
+        return 'Database';
+      case 'document':
+        return 'Document';
+      case 'knowledge_base':
+        return 'Knowledge Base';
+      case 'conversation':
+        return 'Conversation';
+      case 'similar_chat':
+        return 'Similar Chat';
+      default:
+        return 'Source';
+    }
+  };
+
+  // Component for displaying source references - now integrated into MessageRenderer
+  // This component is kept for backward compatibility but not used
+  const SourceReferences = ({ sources, messageId }: { sources: SourceReference[], messageId: string }) => {
+    // This component has been replaced by the MessageRenderer component
+    return null;
+  };
+
   const SessionDropdown = ({ sessionId }: { sessionId: string }) => {
     const session = sessions.find((s: any) => s.id === sessionId);
     if (!session) return null;
@@ -163,17 +279,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
           <button
             onClick={() => {
               setEditingTitle(sessionId);
-              setShowDropdown(null);
-            }}
-            className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50 dark:hover:bg-neutral-800 rounded flex items-center gap-2 text-gray-800 dark:text-gray-200"
-          >
-            <Edit3 size={14} />
-            Rename
-          </button>
-
-          <button
-            onClick={() => {
-              updateSession(sessionId, { isPinned: !session.isPinned });
               setShowDropdown(null);
             }}
             className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50 dark:hover:bg-neutral-800 rounded flex items-center gap-2 text-gray-800 dark:text-gray-200"
@@ -253,21 +358,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
               <div className="flex gap-2">
                 <button
                   onClick={() => handleArchiveToggle(false)}
-                  className={`px-3 py-1 text-sm rounded transition-colors ${
-                    !showArchived
-                      ? 'bg-gray-200 text-gray-900 dark:bg-neutral-800 dark:text-gray-100'
-                      : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800'
-                  }`}
+                  className={`px-3 py-1 text-sm rounded transition-colors ${!showArchived
+                    ? 'bg-gray-200 text-gray-900 dark:bg-neutral-800 dark:text-gray-100'
+                    : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800'
+                    }`}
                 >
                   Active
                 </button>
                 <button
                   onClick={() => handleArchiveToggle(true)}
-                  className={`px-3 py-1 text-sm rounded transition-colors ${
-                    showArchived
-                      ? 'bg-gray-200 text-gray-900 dark:bg-neutral-800 dark:text-gray-100'
-                      : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800'
-                  }`}
+                  className={`px-3 py-1 text-sm rounded transition-colors ${showArchived
+                    ? 'bg-gray-200 text-gray-900 dark:bg-neutral-800 dark:text-gray-100'
+                    : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800'
+                    }`}
                 >
                   Archived
                 </button>
@@ -289,11 +392,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                   {filteredSessions.map((session: any) => (
                     <div
                       key={session.id}
-                      className={`group relative p-3 rounded-lg cursor-pointer transition-colors mb-1 ${
-                        currentSession?.id === session.id
-                          ? 'bg-gray-100 dark:bg-neutral-800 border border-gray-300 dark:border-neutral-700'
-                          : 'hover:bg-gray-50 dark:hover:bg-neutral-900'
-                      }`}
+                      className={`group relative p-3 rounded-lg cursor-pointer transition-colors mb-1 ${currentSession?.id === session.id
+                        ? 'bg-gray-100 dark:bg-neutral-800 border border-gray-300 dark:border-neutral-700'
+                        : 'hover:bg-gray-50 dark:hover:bg-neutral-900'
+                        }`}
                     >
                       <div
                         onClick={() => fetchSession(session.id)}
@@ -383,7 +485,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
         {/* Collapse Toggle */}
         <div className="p-2 border-t border-gray-200 dark:border-neutral-800">
           <button
-            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            onClick={() => {
+              const next = !sidebarCollapsed;
+              setSidebarCollapsed(next);
+              updateUserSettings({ sidebarCollapsed: next });
+            }}
             className="w-full p-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
             title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
@@ -429,11 +535,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                 <div className="flex items-center gap-2 ml-4">
                   <button
                     onClick={() => updateSession(currentSession.id, { isPinned: !currentSession.isPinned })}
-                    className={`p-2 rounded-lg transition-colors ${
-                      currentSession.isPinned
-                        ? 'bg-gray-200 text-gray-900 dark:bg-neutral-800 dark:text-gray-100'
-                        : 'text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-neutral-800'
-                    }`}
+                    className={`p-2 rounded-lg transition-colors ${currentSession.isPinned
+                      ? 'bg-gray-200 text-gray-900 dark:bg-neutral-800 dark:text-gray-100'
+                      : 'text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-neutral-800'
+                      }`}
                     title={currentSession.isPinned ? 'Unpin chat' : 'Pin chat'}
                   >
                     <Pin size={16} />
@@ -441,6 +546,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                   <button
                     className="p-2 text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-neutral-800 rounded-lg transition-colors"
                     title="Chat settings"
+                    onClick={() => setIsSettingsOpen(true)}
                   >
                     <Settings size={16} />
                   </button>
@@ -457,45 +563,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
 
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50 dark:bg-black">
-              {currentSession.chatMessages.map((message: any) => (
-                <div
+              {currentSession.chatMessages.map((message: EnhancedChatMessage) => (
+                <MessageRenderer
                   key={message.id}
-                  className={`flex ${message.role === 'USER' ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div
-                    className={`max-w-3xl rounded-lg p-4 ${
-                      message.role === 'USER'
-                        ? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900'
-                        : 'bg-white dark:bg-neutral-950 border border-gray-200 dark:border-neutral-800 text-gray-900 dark:text-gray-100'
-                    }`}
-                  >
-                    <div className="whitespace-pre-wrap break-words">{message.content}</div>
-
-                    {message.role === 'ASSISTANT' && message.content?.trim() && (
-                      <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-100 dark:border-neutral-800 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
-                        {message.modelUsed && (
-                          <span className="flex items-center gap-1">
-                            <span className="w-1.5 h-1.5 bg-gray-400 dark:bg-gray-500 rounded-full"></span>
-                            {message.modelUsed}
-                          </span>
-                        )}
-                        {message.executionTime && (
-                          <span className="flex items-center gap-1">
-                            <Clock size={12} />
-                            {message.executionTime}ms
-                          </span>
-                        )}
-                        {message.dbQueryUsed && (
-                          <span className="flex items-center gap-1">
-                            <Database size={12} />
-                            Database used
-                          </span>
-                        )}
-                        <span>{new Date(message.createdAt).toLocaleTimeString()}</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
+                  message={message}
+                />
               ))}
 
               {isLoading && (
@@ -601,6 +673,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
           </div>
         )}
       </div>
+      <SettingsPanel open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </div>
   );
 };

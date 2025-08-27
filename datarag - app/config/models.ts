@@ -1,6 +1,6 @@
 // config/models.ts
 export const AVAILABLE_MODELS = {
-  "deepseek-r1:7b": {
+  "MFDoom/deepseek-r1-tool-calling:7b": {
     name: "DeepSeek R1 7B",
     temperature: 0.3,
     contextWindow: 8192

@@ -235,9 +235,11 @@ ${recentMessages}
           requestId,
           length: aiText?.length || 0,
         });
+        console.log("AI Response:", aiText);
 
+        // Only save if there's meaningful content
         if (aiText && aiText.trim().length > 0) {
-          await prismadb.message.create({
+          await prismadb.documentMessage.create({
             data: {
               content: aiText,
               role: "SYSTEM", // Change to "ASSISTANT" if that's your DB enum/UI convention
@@ -316,7 +318,6 @@ export async function GET(
       });
       return NextResponse.json({ error: "Document not found" }, { status: 404 });
     }
-
     const formattedMessages = document.messages.map((msg) => ({
       id: msg.id,
       role: msg.role.toLowerCase(),
@@ -339,8 +340,8 @@ export async function GET(
         category: document.category?.name,
         createdAt: document.createdAt.toISOString(),
         updatedAt: document.updatedAt.toISOString(),
-        createdBy: document.createdBy,
-        fileUrl: document.fileurl,
+        userId: document.userId,
+        fileUrl: document.fileUrl,
       },
       messages: formattedMessages,
       conversation_stats: {
@@ -400,7 +401,7 @@ export async function DELETE(
     const { user } = authResult;
 
     const document = await prismadb.document.findFirst({
-      where: { id: params.chatId, createdBy: user.id },
+      where: { id: params.chatId, userId: user.id },
     });
 
     if (!document) {
@@ -415,7 +416,7 @@ export async function DELETE(
       );
     }
 
-    const deletedMessages = await prismadb.message.deleteMany({
+    const deletedMessages = await prismadb.documentMessage.deleteMany({
       where: { documentId: params.chatId },
     });
 

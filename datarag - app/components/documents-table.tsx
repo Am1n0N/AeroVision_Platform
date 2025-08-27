@@ -43,7 +43,7 @@ export function DocumentsTable<TData, TValue>({
                             <TableRow key={row.id} data-state={row.getIsSelected() && "selected"}>
                                 {row.getVisibleCells().map((cell) => (
                                     <TableCell key={cell.id} className="w-1/10" onClick={() => window.location.href = `/chat/${(row.original as { id: string }).id}`}>
-                                        {cell.column.id === "fileurl" ? (
+                                        {cell.column.id === "fileUrl" ? (
                                             <div className="relative h-full w-full">
                                                 <PdfThumbnail pdfUrl={cell.getValue() as string} />
                                             </div>

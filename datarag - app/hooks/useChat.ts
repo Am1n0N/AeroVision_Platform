@@ -1,4 +1,4 @@
-// hooks/useChat.ts - Updated to handle title updates properly
+// hooks/useChat.ts — Robust streaming: handles JSON frames and <think> tags
 import { useState, useCallback, useRef, useMemo } from 'react';
 
 interface ChatSession {
@@ -12,7 +12,20 @@ interface ChatSession {
   createdAt: string;
 }
 
-interface ChatMessage {
+export interface SourceReference {
+  id: string;
+  type: 'database' | 'document' | 'knowledge_base' | 'conversation' | 'similar_chat';
+  title: string;
+  section?: string;
+  pageNumber?: number;
+  snippet: string;
+  relevanceScore?: number;
+  metadata?: Record<string, any>;
+  url?: string;
+  timestamp?: string;
+}
+
+export interface ChatMessage {
   id: string;
   content: string;
   role: 'USER' | 'ASSISTANT' | 'SYSTEM';
@@ -21,6 +34,13 @@ interface ChatMessage {
   executionTime?: number;
   dbQueryUsed?: boolean;
   contextSources?: string;
+  sources?: SourceReference[];
+
+  // NEW: extracted reasoning, never rendered inline
+  thinking?: string;
+
+  // NEW: UI hint while the server is still streaming
+  isStreaming?: boolean;
 }
 
 interface SessionDetail {
@@ -46,7 +66,6 @@ export const useChat = (options: UseChatOptions = {}) => {
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
 
-  // Add request tracking to prevent spam
   const requestTrackingRef = useRef({
     lastSessionsFetch: 0,
     lastSessionFetch: '',
@@ -55,86 +74,120 @@ export const useChat = (options: UseChatOptions = {}) => {
   });
 
   const lastSessionIdRef = useRef<string | null>(null);
-
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const { onError, onSessionCreated } = options;
 
-  // Memoized fetchSessions to prevent recreation on every render
+  // ---------------- Helpers ----------------
+
+  const parseSourceReferences = (response: Response): SourceReference[] => {
+    try {
+      const sourcesHeader = response.headers.get('X-Sources');
+      if (!sourcesHeader) return [];
+      const sources = JSON.parse(sourcesHeader);
+      return Array.isArray(sources) ? sources : [];
+    } catch {
+      return [];
+    }
+  };
+
+  /** Stream-safe splitter for <think>…</think> in **plain text** streams */
+  function splitThinkTags(
+    incoming: string,
+    state: { buffer: string; inThink: boolean; visible: string; thinking: string }
+  ) {
+    state.buffer += incoming;
+    while (state.buffer.length) {
+      if (!state.inThink) {
+        const openIdx = state.buffer.toLowerCase().indexOf('<think>');
+        if (openIdx === -1) {
+          state.visible += state.buffer;
+          state.buffer = '';
+          break;
+        }
+        state.visible += state.buffer.slice(0, openIdx);
+        state.buffer = state.buffer.slice(openIdx + '<think>'.length);
+        state.inThink = true;
+      } else {
+        const closeIdx = state.buffer.toLowerCase().indexOf('</think>');
+        if (closeIdx === -1) {
+          state.thinking += state.buffer;
+          state.buffer = '';
+          break;
+        }
+        state.thinking += state.buffer.slice(0, closeIdx);
+        state.buffer = state.buffer.slice(closeIdx + '</think>'.length);
+        state.inThink = false;
+      }
+    }
+  }
+
+  /** Try to parse a JSON object with {content, thinking, sources} */
+  function parseJsonFrame(raw: string): { content?: string; thinking?: string; sources?: SourceReference[] } | null {
+    const trimmed = raw.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && (obj.content || obj.answer || obj.thinking || obj.sources)) {
+        return {
+          content: obj.content ?? obj.answer,
+          thinking: obj.thinking,
+          sources: Array.isArray(obj.sources) ? obj.sources : undefined,
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ---------------- Fetch sessions list ----------------
+
   const fetchSessions = useCallback(async (archived = false, force = false) => {
     const now = Date.now();
     const timeSinceLastFetch = now - requestTrackingRef.current.lastSessionsFetch;
-
-    // Prevent spam: Don't fetch if we just fetched within 1 second, unless forced
-    if (!force && timeSinceLastFetch < 1000) {
-      console.log('Skipping sessions fetch - too soon since last request');
-      return;
-    }
-
-    // Prevent multiple simultaneous requests
-    if (requestTrackingRef.current.isFetchingSessions) {
-      console.log('Skipping sessions fetch - already in progress');
-      return;
-    }
+    if (!force && timeSinceLastFetch < 1000) return;
+    if (requestTrackingRef.current.isFetchingSessions) return;
 
     requestTrackingRef.current.isFetchingSessions = true;
     requestTrackingRef.current.lastSessionsFetch = now;
     setIsLoadingSessions(true);
 
     try {
-      const response = await fetch(`/api/chat?action=sessions&archived=${archived}`, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch sessions: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const res = await fetch(`/api/chat?action=sessions&archived=${archived}`, { method: 'GET' });
+      if (!res.ok) throw new Error(`Failed to fetch sessions: ${res.statusText}`);
+      const data = await res.json();
       setSessions(data.sessions || []);
-    } catch (error) {
-      console.error('Error fetching sessions:', error);
-      onError?.(error as Error);
+    } catch (err) {
+      onError?.(err as Error);
     } finally {
       setIsLoadingSessions(false);
       requestTrackingRef.current.isFetchingSessions = false;
     }
   }, [onError]);
 
-  // Memoized fetchSession to prevent recreation
-  const fetchSession = useCallback(async (sessionId: string, force = false) => {
-    // Prevent fetching the same session multiple times
-    if (!force && requestTrackingRef.current.lastSessionFetch === sessionId) {
-      console.log('Skipping session fetch - same session already fetched');
-      return;
-    }
+  // ---------------- Fetch a single session ----------------
 
-    // Prevent multiple simultaneous requests
-    if (requestTrackingRef.current.isFetchingSession) {
-      console.log('Skipping session fetch - already in progress');
-      return;
-    }
+  const fetchSession = useCallback(async (sessionId: string, force = false) => {
+    if (!force && requestTrackingRef.current.lastSessionFetch === sessionId) return;
+    if (requestTrackingRef.current.isFetchingSession) return;
 
     requestTrackingRef.current.isFetchingSession = true;
     requestTrackingRef.current.lastSessionFetch = sessionId;
 
     try {
-      const response = await fetch(`/api/chat?action=session&sessionId=${sessionId}`, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch session: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const res = await fetch(`/api/chat?action=session&sessionId=${sessionId}`, { method: 'GET' });
+      if (!res.ok) throw new Error(`Failed to fetch session: ${res.statusText}`);
+      const data = await res.json();
       const session = data.session;
 
-      setCurrentSession(session);
+      const headerSources = parseSourceReferences(res);
+      if (headerSources.length && session.chatMessages.length) {
+        const last = session.chatMessages[session.chatMessages.length - 1];
+        if (last.role === 'ASSISTANT') last.sources = headerSources;
+      }
 
-      // Update the sessions list with the latest session data (including updated title)
+      setCurrentSession(session);
       setSessions(prev => prev.map(s =>
         s.id === sessionId
           ? {
@@ -143,21 +196,21 @@ export const useChat = (options: UseChatOptions = {}) => {
             messageCount: session.chatMessages.length,
             lastMessageAt: session.lastMessageAt || s.lastMessageAt,
             isPinned: session.isPinned,
-            isArchived: session.isArchived
+            isArchived: session.isArchived,
           }
           : s
       ));
-
-    } catch (error) {
-      console.error('Error fetching session:', error);
-      onError?.(error as Error);
-      // Reset tracking on error
+    } catch (err) {
+      onError?.(err as Error);
       requestTrackingRef.current.lastSessionFetch = '';
     } finally {
       requestTrackingRef.current.isFetchingSession = false;
     }
   }, [onError]);
 
+  // ---------------- Send / Stream message ----------------
+
+  // inside useChat.ts — replace your sendMessage implementation with this one
   const sendMessage = useCallback(async (
     message: string,
     sessionId?: string,
@@ -170,36 +223,44 @@ export const useChat = (options: UseChatOptions = {}) => {
   ) => {
     if (!message.trim() || isLoading) return null;
 
-    // Abort any in-flight request
     if (abortControllerRef.current) abortControllerRef.current.abort();
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
     setIsLoading(true);
 
-    // 1) Optimistic USER message
-    const userMsgId = `u-${Date.now()}`;
-    const nowIso = new Date().toISOString();
-    const optimisticUser: ChatMessage = {
-      id: userMsgId,
-      role: "USER",
+    // --- pick the model (options > current session > localStorage > default)
+    const FALLBACK_MODEL = "deepseek-r1:7b";
+    let storedDefaultModel: string | undefined;
+    try {
+      storedDefaultModel = typeof window !== "undefined"
+        ? (localStorage.getItem("defaultModel") || undefined)
+        : undefined;
+    } catch { /* ignore */ }
+
+    const selectedModel =
+      options.model
+      ?? currentSession?.modelKey
+      ?? storedDefaultModel
+      ?? FALLBACK_MODEL;
+
+    // optimistic USER bubble
+    const userMsg: ChatMessage = {
+      id: `u-${Date.now()}`,
+      role: 'USER',
       content: message.trim(),
-      createdAt: nowIso,
+      createdAt: new Date().toISOString(),
     };
 
-    // Is this the first message in the visible session?
-    const isFirstMessage = !currentSession || currentSession.chatMessages.length === 0;
+    const firstInThread = !currentSession || currentSession.chatMessages.length === 0;
 
-    // Ensure UI shows the user bubble immediately (don’t invent a fake id)
     setCurrentSession(prev => {
-      if (prev) {
-        return { ...prev, chatMessages: [...prev.chatMessages, optimisticUser] };
-      }
+      if (prev) return { ...prev, chatMessages: [...prev.chatMessages, userMsg] };
       return {
-        id: "", // will be set as soon as we read it from response headers
-        title: "New Chat",
-        chatMessages: [optimisticUser],
-        modelKey: options.model || "deepseek-r1:7b",
+        id: '',
+        title: 'New Chat',
+        chatMessages: [userMsg],
+        modelKey: selectedModel,                   // <-- use selected model here
         useDatabase: options.enableDatabaseQueries ?? true,
         useKnowledgeBase: options.useKnowledgeBase ?? true,
         temperature: options.temperature ?? 0.2,
@@ -208,75 +269,76 @@ export const useChat = (options: UseChatOptions = {}) => {
       };
     });
 
-    // Sidebar preview bump if we already have a concrete session id
     if (currentSession?.id) {
-      setSessions(prev =>
-        prev.map(s =>
-          s.id === currentSession.id
-            ? { ...s, lastMessageAt: nowIso, messageCount: s.messageCount + 1 }
-            : s
-        )
-      );
+      const nowIso = new Date().toISOString();
+      setSessions(prev => prev.map(s => s.id === currentSession.id
+        ? { ...s, lastMessageAt: nowIso, messageCount: s.messageCount + 1 }
+        : s));
     }
 
-    // 2) Temporary ASSISTANT bubble to stream into
-    const asstTempId = `a-${Date.now()}`;
-    setCurrentSession(prev =>
-      prev
-        ? {
-          ...prev,
-          chatMessages: [
-            ...prev.chatMessages,
-            { id: asstTempId, role: "ASSISTANT", content: "", createdAt: new Date().toISOString() },
-          ],
-        }
-        : prev
-    );
+    // temp ASSISTANT bubble
+    const asstId = `a-${Date.now()}`;
+    setCurrentSession(prev => prev ? {
+      ...prev,
+      chatMessages: [...prev.chatMessages, {
+        id: asstId,
+        role: 'ASSISTANT',
+        content: '',
+        createdAt: new Date().toISOString(),
+        sources: [],
+        isStreaming: true,
+        thinking: '',
+      }],
+    } : prev);
 
     try {
-      // ---- Choose a stable session id for this request ----
-      const currentId = currentSession?.id && currentSession.id.trim() ? currentSession.id : undefined;
-      const effectiveSessionId = sessionId ?? currentId ?? lastSessionIdRef.current ?? undefined;
+      const existingId = currentSession?.id?.trim() ? currentSession.id : undefined;
+      const effectiveSessionId = sessionId ?? existingId ?? lastSessionIdRef.current ?? undefined;
 
-      // ---- Build request body ----
-      // Only send `model` if caller explicitly switches; otherwise let the server use the session’s model.
       const body: any = {
-        messages: [{ role: "user", content: message.trim() }],
+        messages: [{ role: 'user', content: message.trim() }],
         sessionId: effectiveSessionId,
-        ...(options.model ? { model: options.model } : {}),
+        model: selectedModel,                      // <-- SEND selected model
+        modelKey: selectedModel,                   // <-- (also include modelKey for routes that expect it)
         useKnowledgeBase: options.useKnowledgeBase ?? currentSession?.useKnowledgeBase ?? true,
         enableDatabaseQueries: options.enableDatabaseQueries ?? currentSession?.useDatabase ?? true,
         temperature: options.temperature ?? currentSession?.temperature ?? 0.2,
       };
 
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: abortController.signal,
       });
-      if (!response.ok) throw new Error(`Failed to send message: ${response.statusText}`);
+      if (!res.ok) throw new Error(`Failed to send message: ${res.statusText}`);
 
-      // Authoritative ids/flags from server
-      const responseSessionId =
-        response.headers.get("X-Session-ID") || effectiveSessionId || currentSession?.id || "";
-
-      // Persist it for future sends (even if React state hasn’t caught up yet)
+      const responseSessionId = res.headers.get('X-Session-ID') || effectiveSessionId || currentSession?.id || '';
       if (responseSessionId) lastSessionIdRef.current = responseSessionId;
 
-      const isNewSession = response.headers.get("X-Is-New-Session") === "true";
-      const titleUpdated = response.headers.get("X-Title-Updated") === "true";
+      const isNewSession = res.headers.get('X-Is-New-Session') === 'true';
+      const titleUpdated = res.headers.get('X-Title-Updated') === 'true';
+      const headerSources = parseSourceReferences(res);
 
       if (isNewSession && responseSessionId) {
-        onSessionCreated?.(responseSessionId);
+        options.onSessionCreated?.(responseSessionId as any);
         await fetchSessions(false, true);
       }
 
-      // 3) Stream response into the temp assistant bubble
-      const reader = response.body?.getReader();
+      // --- Streaming state machine (unchanged) ---
+      const reader = res.body?.getReader();
       const decoder = new TextDecoder();
 
       if (reader) {
+        const state = {
+          buffer: '',
+          inThink: false,
+          visible: '',
+          thinking: '',
+          jsonMode: false,
+          jsonBuffer: '',
+        };
+
         try {
           while (true) {
             const { done, value } = await reader.read();
@@ -285,56 +347,128 @@ export const useChat = (options: UseChatOptions = {}) => {
             const chunk = decoder.decode(value, { stream: true });
             if (!chunk) continue;
 
+            if (!state.jsonMode && state.visible === '' && /^\s*[{[]/.test(chunk)) {
+              state.jsonMode = true;
+            }
+
+            if (state.jsonMode) {
+              state.jsonBuffer += chunk;
+            } else {
+              splitThinkTags(chunk, state);
+            }
+
             setCurrentSession(prev => {
               if (!prev) return prev;
               const msgs = prev.chatMessages.map(m =>
-                m.id === asstTempId ? { ...m, content: (m.content || "") + chunk } : m
+                m.id === asstId
+                  ? {
+                    ...m,
+                    content: state.jsonMode ? '' : state.visible,
+                    thinking: state.jsonMode ? undefined : (state.thinking || undefined),
+                    sources: headerSources,
+                    isStreaming: true,
+                  }
+                  : m
               );
-              // ensure we set the concrete id asap
               return { ...prev, id: prev.id || responseSessionId, chatMessages: msgs };
             });
           }
         } finally {
           reader.releaseLock?.();
         }
+
+        if (state.jsonMode) {
+          const frame = parseJsonFrame(state.jsonBuffer);
+          if (frame) {
+            let finalContent = frame.content ?? '';
+            let finalThinking = frame.thinking ?? '';
+
+            if (!finalThinking && /<think>/.test(finalContent)) {
+              const temp = { buffer: '', inThink: false, visible: '', thinking: '' };
+              splitThinkTags(finalContent, temp);
+              if (temp.buffer) splitThinkTags('', temp);
+              finalContent = temp.visible;
+              finalThinking = temp.thinking;
+            }
+
+            setCurrentSession(prev => {
+              if (!prev) return prev;
+              const msgs = prev.chatMessages.map(m =>
+                m.id === asstId
+                  ? {
+                    ...m,
+                    content: finalContent,
+                    thinking: finalThinking || undefined,
+                    sources: frame.sources?.length ? frame.sources : (headerSources || []),
+                    isStreaming: false,
+                  }
+                  : m
+              );
+              return { ...prev, chatMessages: msgs };
+            });
+          } else {
+            const temp = { buffer: '', inThink: false, visible: '', thinking: '' };
+            splitThinkTags(state.jsonBuffer, temp);
+            if (temp.buffer) splitThinkTags('', temp);
+            setCurrentSession(prev => {
+              if (!prev) return prev;
+              const msgs = prev.chatMessages.map(m =>
+                m.id === asstId
+                  ? {
+                    ...m,
+                    content: temp.visible,
+                    thinking: temp.thinking || undefined,
+                    sources: headerSources,
+                    isStreaming: false,
+                  }
+                  : m
+              );
+              return { ...prev, chatMessages: msgs };
+            });
+          }
+        } else {
+          if (state.buffer) splitThinkTags('', state);
+          setCurrentSession(prev => {
+            if (!prev) return prev;
+            const msgs = prev.chatMessages.map(m =>
+              m.id === asstId
+                ? {
+                  ...m,
+                  content: state.visible,
+                  thinking: state.thinking || undefined,
+                  sources: headerSources,
+                  isStreaming: false,
+                }
+                : m
+            );
+            return { ...prev, chatMessages: msgs };
+          });
+        }
       }
 
-      // 4) Final reconcile with server truth (title, counts, etc.)
-      if (responseSessionId && (isFirstMessage || titleUpdated || isNewSession)) {
+      if (responseSessionId && (firstInThread || titleUpdated || isNewSession)) {
         setTimeout(() => {
-          requestTrackingRef.current.lastSessionFetch = "";
+          requestTrackingRef.current.lastSessionFetch = '';
           fetchSession(responseSessionId, true);
         }, 100);
       }
 
-      return { sessionId: responseSessionId, isNewSession };
-    } catch (error) {
-      // On error, remove temp assistant bubble; keep the user bubble
+      return { sessionId: responseSessionId, isNewSession, sources: headerSources };
+    } catch (err) {
       setCurrentSession(prev => {
         if (!prev) return prev;
-        return {
-          ...prev,
-          chatMessages: prev.chatMessages.filter(m => m.id !== asstTempId),
-        };
+        return { ...prev, chatMessages: prev.chatMessages.filter(m => m.id !== asstId) };
       });
-      onError?.(error as Error);
-      throw error;
+      onError?.(err as Error);
+      throw err;
     } finally {
       setIsLoading(false);
       abortControllerRef.current = null;
     }
-  }, [
-    isLoading,
-    currentSession,
-    onError,
-    onSessionCreated,
-    fetchSessions,
-    fetchSession,
-    setCurrentSession,
-    setSessions,
-  ]);
+  }, [isLoading, currentSession, onError, fetchSessions, fetchSession]);
 
-  // Update session
+  // ---------------- Update session ----------------
+
   const updateSession = useCallback(async (
     sessionId: string,
     updates: Partial<{
@@ -348,71 +482,50 @@ export const useChat = (options: UseChatOptions = {}) => {
     }>
   ) => {
     try {
-      const response = await fetch('/api/chat', {
+      const res = await fetch('/api/chat', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId, ...updates }),
       });
+      if (!res.ok) throw new Error(`Failed to update session: ${res.statusText}`);
+      const data = await res.json();
 
-      if (!response.ok) {
-        throw new Error(`Failed to update session: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-
-      // Update local state without refetching
-      setSessions(prev => prev.map(s =>
-        s.id === sessionId ? { ...s, ...updates } : s
-      ));
-
+      setSessions(prev => prev.map(s => (s.id === sessionId ? { ...s, ...updates } : s)));
       if (currentSession?.id === sessionId) {
-        setCurrentSession(prev => prev ? { ...prev, ...updates } : null);
+        setCurrentSession(prev => (prev ? { ...prev, ...updates } : null));
       }
-
       return data.session;
-    } catch (error) {
-      console.error('Error updating session:', error);
-      onError?.(error as Error);
-      throw error;
+    } catch (err) {
+      onError?.(err as Error);
+      throw err;
     }
   }, [currentSession, onError]);
 
-  // Delete or archive session
+  // ---------------- Delete / archive ----------------
+
   const deleteSession = useCallback(async (sessionId: string, archive = false) => {
     try {
-      const response = await fetch(`/api/chat?sessionId=${sessionId}&archive=${archive}`, {
-        method: 'DELETE',
-      });
+      const res = await fetch(`/api/chat?sessionId=${sessionId}&archive=${archive}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`Failed to ${archive ? 'archive' : 'delete'} session: ${res.statusText}`);
 
-      if (!response.ok) {
-        throw new Error(`Failed to ${archive ? 'archive' : 'delete'} session: ${response.statusText}`);
-      }
+      setSessions(prev => archive
+        ? prev.map(s => (s.id === sessionId ? { ...s, isArchived: true } : s))
+        : prev.filter(s => s.id !== sessionId)
+      );
 
-      // Update local state without refetching
-      if (archive) {
-        setSessions(prev => prev.map(s =>
-          s.id === sessionId ? { ...s, isArchived: true } : s
-        ));
-      } else {
-        setSessions(prev => prev.filter(s => s.id !== sessionId));
-      }
-
-      // Clear current session if it was deleted/archived
       if (currentSession?.id === sessionId) {
         setCurrentSession(null);
-        // Reset session tracking
         requestTrackingRef.current.lastSessionFetch = '';
       }
-
       return true;
-    } catch (error) {
-      console.error('Error deleting session:', error);
-      onError?.(error as Error);
-      throw error;
+    } catch (err) {
+      onError?.(err as Error);
+      throw err;
     }
   }, [currentSession, onError]);
 
-  // Cancel current request
+  // ---------------- Cancel ----------------
+
   const cancelRequest = useCallback(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -420,8 +533,9 @@ export const useChat = (options: UseChatOptions = {}) => {
     }
   }, []);
 
-  // Fixed createNewSession function
-  const createNewSession = useCallback(async (options?: {
+  // ---------------- Create new session ----------------
+
+  const createNewSession = useCallback(async (opts?: {
     title?: string;
     model?: string;
     useKnowledgeBase?: boolean;
@@ -431,58 +545,40 @@ export const useChat = (options: UseChatOptions = {}) => {
     try {
       const body = {
         action: 'create',
-        title: options?.title || 'New Chat', // Start with generic title
-        modelKey: options?.model || 'deepseek-r1:7b',
-        useKnowledgeBase: options?.useKnowledgeBase ?? true,
-        useDatabase: options?.enableDatabaseQueries ?? true,
-        temperature: options?.temperature ?? 0.2,
+        title: opts?.title || 'New Chat',
+        modelKey: opts?.model || 'MFDoom/deepseek-r1-tool-calling:7b',
+        useKnowledgeBase: opts?.useKnowledgeBase ?? true,
+        useDatabase: opts?.enableDatabaseQueries ?? true,
+        temperature: opts?.temperature ?? 0.2,
       };
-
-      const response = await fetch('/api/chat', {
+      const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-
-      if (!response.ok) {
-        throw new Error(`Failed to create session: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      if (!res.ok) throw new Error(`Failed to create session: ${res.statusText}`);
+      const data = await res.json();
       const newSession = data.session;
 
-      // Update sessions list
       setSessions(prev => [newSession, ...prev]);
-
-      // Set as current session
-      setCurrentSession({
-        ...newSession,
-        chatMessages: [], // New session starts with no messages
-      });
-
-      // Reset session tracking
+      setCurrentSession({ ...newSession, chatMessages: [] });
       requestTrackingRef.current.lastSessionFetch = newSession.id;
-
-      // Notify callback
-      onSessionCreated?.(newSession.id);
-
+      options.onSessionCreated?.(newSession.id);
       return newSession.id;
-    } catch (error) {
-      console.error('Error creating new session:', error);
-      onError?.(error as Error);
-      throw error;
+    } catch (err) {
+      onError?.(err as Error);
+      throw err;
     }
-  }, [onError, onSessionCreated]);
+  }, [onError, options]);
 
-  // Memoize the return object to prevent unnecessary re-renders
+  // ---------------- Return ----------------
+
   return useMemo(() => ({
-    // State
     sessions,
     currentSession,
     isLoading,
     isLoadingSessions,
 
-    // Actions
     fetchSessions,
     fetchSession,
     sendMessage,
@@ -491,7 +587,6 @@ export const useChat = (options: UseChatOptions = {}) => {
     cancelRequest,
     createNewSession,
 
-    // Setters (for direct state manipulation if needed)
     setSessions,
     setCurrentSession,
   }), [
@@ -509,90 +604,173 @@ export const useChat = (options: UseChatOptions = {}) => {
   ]);
 };
 
-// Hook for managing user preferences
-export const useUserSettings = () => {
-  const [settings, setSettings] = useState({
-    defaultModel: 'deepseek-r1:7b',
-    defaultTemperature: 0.2,
-    useDatabase: true,
-    useKnowledgeBase: true,
-    theme: 'system',
-    sidebarCollapsed: false,
-    showTokenCount: false,
-    showExecutionTime: false,
-  });
+// ---------------- User settings (unchanged) ----------------
+// hooks/useChat.ts — replace your existing useUserSettings with this version
+export interface UserSettings {
+  defaultModel: string;
+  defaultTemperature: number;
+  useDatabase: boolean;
+  useKnowledgeBase: boolean;
+  theme: "light" | "dark" | "system";
+  sidebarCollapsed: boolean;
+  showTokenCount: boolean;
+  showExecutionTime: boolean;
+  showSourceReferences: boolean;
+  maxContextLength: number;
+  rerankingThreshold: number;
+  enableReranking: boolean;
+}
 
+const DEFAULT_USER_SETTINGS: UserSettings = {
+  defaultModel: "deepseek-r1:7b",
+  defaultTemperature: 0.2,
+  useDatabase: true,
+  useKnowledgeBase: true,
+  theme: "system",
+  sidebarCollapsed: false,
+  showTokenCount: false,
+  showExecutionTime: false,
+  showSourceReferences: true,
+  maxContextLength: 6000,
+  rerankingThreshold: 0.5,
+  enableReranking: true,
+};
+
+type FetchOpts = { force?: boolean };
+
+export const useUserSettings = () => {
+  const [settings, setSettings] = useState<UserSettings>(DEFAULT_USER_SETTINGS);
   const [isLoading, setIsLoading] = useState(false);
 
-  const fetchSettings = useCallback(async () => {
-    if (isLoading) return; // Prevent multiple simultaneous calls
+  // de-dupe / throttle guards
+  const inFlightRef = useRef(false);
+  const hasLoadedRef = useRef(false);
+  const lastFetchRef = useRef(0);
+  const MIN_INTERVAL_MS = 10_000; // 10s – tweak as you like
 
+  const fetchSettings = useCallback(async (opts: FetchOpts = {}) => {
+    const now = Date.now();
+    if (inFlightRef.current) return;                 // already fetching
+    if (!opts.force && hasLoadedRef.current) {
+      if (now - lastFetchRef.current < MIN_INTERVAL_MS) return; // throttle
+    }
+
+    inFlightRef.current = true;
     setIsLoading(true);
     try {
-      const response = await fetch('/api/user/settings');
-      if (response.ok) {
-        const data = await response.json();
-        setSettings(data.settings);
+      const res = await fetch("/api/settings", { method: "GET" });
+      lastFetchRef.current = Date.now();
+
+      if (!res.ok) {
+        // If the route 404s, do not keep retrying in a tight loop
+        hasLoadedRef.current = true;
+        return;
       }
-    } catch (error) {
-      console.error('Failed to fetch user settings:', error);
+
+      const data = (await res.json()) as Partial<UserSettings>;
+      setSettings((prev) => ({ ...prev, ...data }));
+      hasLoadedRef.current = true;
+
+      // live-apply theme
+      if (data.theme) {
+        if (data.theme === "dark") document.documentElement.classList.add("dark");
+        else if (data.theme === "light") document.documentElement.classList.remove("dark");
+      }
+    } catch {
+      // keep defaults; avoid retry storm
+      hasLoadedRef.current = true;
     } finally {
+      inFlightRef.current = false;
       setIsLoading(false);
     }
-  }, [isLoading]);
+  }, []);
 
-  const updateSettings = useCallback(async (newSettings: Partial<typeof settings>) => {
+  const updateSettings = useCallback(async (newSettings: Partial<UserSettings>) => {
     try {
-      const response = await fetch('/api/user/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(newSettings),
       });
-
-      if (response.ok) {
-        setSettings(prev => ({ ...prev, ...newSettings }));
-        return true;
+      if (!res.ok) return false;
+      const updated = (await res.json()) as UserSettings;
+      setSettings(updated);
+      // live-apply theme
+      if (updated.theme) {
+        if (updated.theme === "dark") document.documentElement.classList.add("dark");
+        else if (updated.theme === "light") document.documentElement.classList.remove("dark");
       }
-      return false;
-    } catch (error) {
-      console.error('Failed to update user settings:', error);
+      return true;
+    } catch {
       return false;
     }
   }, []);
 
-  return useMemo(() => ({
-    settings,
-    isLoading,
-    fetchSettings,
-    updateSettings,
-  }), [settings, isLoading, fetchSettings, updateSettings]);
+  return useMemo(
+    () => ({
+      settings,
+      isLoading,
+      fetchSettings,      // accepts { force?: boolean }
+      updateSettings,
+    }),
+    [settings, isLoading, fetchSettings, updateSettings]
+  );
 };
 
-// Hook for fetching available models
+
+// ---------------- Models (unchanged) ----------------
+let modelsCache: any[] | null = null;
+let modelsFetchedAt = 0;
+let modelsInFlight: Promise<any[]> | null = null;
+const MODELS_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 export const useModels = () => {
-  const [models, setModels] = useState([]);
+  const [models, setModels] = useState<any[]>(modelsCache ?? []);
   const [isLoading, setIsLoading] = useState(false);
 
-  const fetchModels = useCallback(async () => {
-    if (isLoading) return; // Prevent multiple simultaneous calls
+  const fetchModels = useCallback(async (opts?: { force?: boolean }) => {
+    const now = Date.now();
 
+    // Serve fresh cache (unless forced)
+    if (!opts?.force && modelsCache && now - modelsFetchedAt < MODELS_TTL_MS) {
+      setModels(modelsCache);
+      return modelsCache;
+    }
+
+    // Join existing request if in flight
+    if (modelsInFlight) {
+      const data = await modelsInFlight;
+      setModels(data);
+      return data;
+    }
+
+    // Start a new request
     setIsLoading(true);
+    modelsInFlight = fetch("/api/chat?action=models", { method: "GET" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`models fetch failed: ${res.status}`);
+        const data = await res.json();
+        const list = Array.isArray(data?.models) ? data.models : [];
+        modelsCache = list;
+        modelsFetchedAt = Date.now();
+        console.log('Fetched models:', modelsInFlight);
+        return list;
+      })
+      .finally(() => {
+        modelsInFlight = null;
+      });
+
     try {
-      const response = await fetch('/api/chat?action=models');
-      if (response.ok) {
-        const data = await response.json();
-        setModels(data.models);
-      }
-    } catch (error) {
-      console.error('Failed to fetch models:', error);
+      const data = await modelsInFlight;
+      setModels(data);
+      return data;
+    } catch (e) {
+      // keep whatever we had; do not loop
+      return modelsCache ?? [];
     } finally {
       setIsLoading(false);
     }
-  }, [isLoading]);
+  }, []);
 
-  return useMemo(() => ({
-    models,
-    isLoading,
-    fetchModels,
-  }), [models, isLoading, fetchModels]);
+  return useMemo(() => ({ models, isLoading, fetchModels }), [models, isLoading, fetchModels]);
 };
