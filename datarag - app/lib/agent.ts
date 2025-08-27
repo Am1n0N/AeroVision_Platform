@@ -1,7 +1,5 @@
-// lib/ai-agent.ts — Refactored & Consolidated
-/* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { ChatOllama } from "@langchain/ollama";
+import { ChatGroq } from "@langchain/groq";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { Document } from "@langchain/core/documents";
 import { currentUser } from "@clerk/nextjs";
@@ -23,7 +21,7 @@ import {
   DATABASE_SCHEMA,
   listTables,
   describeTable,
-  sampleTable,
+  initTools,
 } from "@/lib/database-tools";
 
 // App config
@@ -31,7 +29,7 @@ import { AVAILABLE_MODELS, type ModelKey } from "@/config/models";
 import { isDatabaseQuery } from "@/lib/database-detection";
 
 /* -----------------------------------------------------------------------------
- * Embedding config
+ * Embedding config (kept local via Ollama)
  * -------------------------------------------------------------------------- */
 export const EMBEDDING_MODELS = {
   "nomic-embed-text": { dimensions: 768, contextLength: 8192, description: "RAG-tuned local embeddings", chunkSize: 512 },
@@ -158,6 +156,11 @@ export interface EnhancedAgentResponse extends Omit<AgentResponse, 'contexts'> {
   metadata: AgentResponse['metadata'] & {
     sourceCount: number;
     sourceTypes: string[];
+    citationValidation?: {
+      validCitations: number[];
+      invalidCitations: number[];
+      totalCitationCount: number;
+    };
   };
 }
 
@@ -173,14 +176,22 @@ You are an intelligent AI assistant with specialized knowledge in aviation, airp
 
 RESPONSE GUIDELINES:
 - Be accurate and helpful
-- Prefer live database results over general knowledge
+- When database results are provided, present them in clear, well-formatted tables
 - Use simple, business-friendly language
 - Use concrete numbers when available
 - Be honest about limits
 - Keep a professional, approachable tone
-- Use reranked context when available
+- Focus on insights and actionable information
 
-CRITICAL: Always use actual database results when provided.
+DATABASE RESULT HANDLING:
+- Always present database results in table format
+- Include column headers and properly aligned data
+- Show row counts and highlight key findings
+- Provide business context and insights
+- Never show SQL queries to users - focus on results
+- Format data appropriately (dates, numbers, currencies)
+
+CRITICAL: When database results are available, create tables and provide insights based on the actual data.
   `.trim(),
 
   documentChat: `
@@ -196,35 +207,70 @@ GUIDELINES:
   `.trim(),
 
   databaseExpert: `
-You are Querymancer, a MySQL specialist.
+You are Querymancer, a MySQL specialist focused on generating clean, efficient queries.
 
 APPROACH:
-1) Understand user intent
-2) Inspect tables
-3) Build correct, efficient SQL
-4) Validate logic
-5) Present results with clear insights
+1) Understand user intent clearly
+2) Inspect available tables and columns
+3) Build correct, efficient SQL with proper JOINs
+4) Validate logic and add appropriate filters
+5) Return results that enable clear business insights
 
 PRINCIPLES:
-- Use indexed columns in WHERE (airport_iata, airline_iata, date_key)
-- Join properly
-- LIMIT big results
-- Handle NULLs
-- Prefer country_code to country
-- date_key is YYYYMMDD
+- Use indexed columns in WHERE clauses (airport_iata, airline_iata, date_key)
+- Join tables properly with clear relationships
+- Add appropriate LIMIT clauses (default 50, max 100)
+- Handle NULL values appropriately
+- Prefer specific codes (country_code) over text fields
+- date_key format is YYYYMMDD
+- Focus on queries that provide actionable business insights
+
+QUERY STRUCTURE:
+- Always include relevant columns for business analysis
+- Add meaningful ORDER BY clauses
+- Use appropriate aggregation when needed
+- Ensure queries can be easily understood by business users
 
 Current date: ${new Date().toISOString().slice(0, 10)}
-Audience: business analysts and data scientists.
+Target audience: business analysts and data scientists who need actionable insights.
   `.trim(),
 
   reranking: `Return 0.0-1.0 relevance scores. Be precise and consistent.`.trim(),
 };
 
 /* -----------------------------------------------------------------------------
- * Default agent config
+ * Groq model helpers
+ * -------------------------------------------------------------------------- */
+// Map to actual Groq models
+const GROQ_DEFAULT = "openai/gpt-oss-20b";
+const GROQ_FAST = "openai/gpt-oss-20b";
+const GROQ_LONG = "openai/gpt-oss-120b";
+
+function toGroqModel(modelKey?: string, opts?: { purpose?: "chat" | "sql" | "rerank" | "fast" }): string {
+  const raw = (modelKey || "").toLowerCase();
+
+  // caller passed a Groq hint like "groq/llama-3.1-8b-instant"
+  if (raw.startsWith("groq/")) return raw.replace(/^groq\//, "");
+
+  // tolerate "openai/gpt-oss-*" aliases by mapping to Groq models
+  if (raw.includes("openai/gpt-oss-120b")) return GROQ_DEFAULT;
+  if (raw.includes("openai/gpt-oss-20b")) return GROQ_FAST;
+
+  // known direct names (already valid)
+  if (/llama|mixtral/.test(raw)) return modelKey!;
+
+  // choose by purpose
+  if (opts?.purpose === "sql") return GROQ_LONG;
+  if (opts?.purpose === "rerank") return GROQ_FAST;
+  if (opts?.purpose === "fast") return GROQ_FAST;
+  return GROQ_DEFAULT;
+}
+
+/* -----------------------------------------------------------------------------
+ * Default agent config (now pointing to Groq by default)
  * -------------------------------------------------------------------------- */
 const DEFAULT_CONFIG: Required<AgentConfig> = {
-  modelKey: "MFDoom/deepseek-r1-tool-calling:7b",
+  modelKey: "groq/llama-3.1-70b-versatile",
   temperature: 0.2,
   maxTokens: 4000,
   streaming: false,
@@ -232,7 +278,7 @@ const DEFAULT_CONFIG: Required<AgentConfig> = {
   useDatabase: false,
   useKnowledgeBase: false,
   useReranking: true,
-  contextWindow: 8192,
+  contextWindow: 32768,
   timeout: 60000,
   rerankingThreshold: 0.5,
   maxContextLength: 6000,
@@ -249,6 +295,7 @@ function truncateStringByBytes(str: string, maxBytes: number): string {
   return t;
 }
 
+// These health/model-pull helpers remain for LOCAL embeddings via Ollama
 export async function checkOllamaHealth(baseUrl = "http://localhost:11434"): Promise<boolean> {
   try {
     const res = await fetch(`${baseUrl}/api/tags`);
@@ -304,7 +351,9 @@ class MemoryManager {
 
   /* ---------- helpers ---------- */
   private index() {
-    return this.pinecone.Index(process.env.PINECONE_INDEX!);
+    const name = process.env.PINECONE_INDEX;
+    if (!name) throw new Error("PINECONE_INDEX is not set");
+    return this.pinecone.Index(name);
   }
   private async store(namespace?: string) {
     return PineconeStore.fromExistingIndex(this.embeddings, { pineconeIndex: this.index(), textKey: "text", namespace });
@@ -316,7 +365,8 @@ class MemoryManager {
       .replace(/([.!?])([A-Z])/g, "$1 $2")
       .replace(/^Page \d+.*$/gm, "")
       .replace(/^\d+\s*$/gm, "")
-      .replace(/[""]/g, '"')
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
       .replace(/[–—]/g, "-")
       .trim();
   }
@@ -439,15 +489,15 @@ class MemoryManager {
     const scored = await store.similaritySearchWithScore(query, k, filter);
 
     const docs = scored.map(([doc, score]) => {
-      doc.metadata = { ...doc.metadata, searchScore: score };
+      (doc as any).metadata = { ...(doc as any).metadata, searchScore: score };
       return doc;
     });
 
     if (useReranking && docs.length > 1) {
-      const rer = await this.rerankDocuments(query, docs, modelKey, threshold);
+      const rer = await this.rerankDocuments(query, docs as any, modelKey, threshold);
       return { documents: rer.slice(0, topK).map((r) => r.document), rerankingResults: rer.slice(0, topK) };
     }
-    return { documents: docs.slice(0, topK), rerankingResults: [] as RerankingResult[] };
+    return { documents: docs.slice(0, topK) as any, rerankingResults: [] as RerankingResult[] };
   }
   knowledgeBaseSearch(query: string, topK = 5, filters?: Record<string, any>, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
     return this.searchCore(MemoryManager.NS_KB, query, { topK, filters, useReranking, modelKey, threshold });
@@ -461,20 +511,22 @@ class MemoryManager {
     const filters = this.cfg.enableMetadataFiltering ? { userId } : undefined;
     return this.searchCore(ns, query, { topK, filters, useReranking, modelKey, threshold });
   }
-  /* ---------- reranking ---------- */
+
+  /* ---------- reranking (via Groq) ---------- */
   async rerankDocuments(
     query: string,
     documents: Document[],
-    modelKey: ModelKey = "MFDoom/deepseek-r1-tool-calling:7b",
+    modelKey: ModelKey = "groq/llama-3.1-8b-instant",
     threshold = 0.5
   ): Promise<RerankingResult[]> {
     if (!documents.length) return [];
     try {
-      const model = new ChatOllama({
-        baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
-        model: modelKey,
+      const modelName = toGroqModel(String(modelKey), { purpose: "rerank" });
+      const model = new ChatGroq({
+        apiKey: process.env.GROQ_API_KEY,
+        model: modelName,
         temperature: 0.1,
-        keepAlive: "10m",
+        maxTokens: 1024,
       });
 
       const results: RerankingResult[] = [];
@@ -512,6 +564,7 @@ class MemoryManager {
       return documents.map((d, i) => ({ document: d, relevanceScore: 0.5, originalRank: i, newRank: i }));
     }
   }
+
   /* ---------- chat history (Redis + vectors) ---------- */
   private docKey(k: DocumentKey) {
     return `${k.documentName}-${k.modelName}-${k.userId}`;
@@ -561,33 +614,74 @@ class MemoryManager {
 }
 
 /* -----------------------------------------------------------------------------
- * Database Query Executor (trimmed but equivalent capability)
+ * Database Query Executor (generation via Groq) - FIXED VERSION
  * -------------------------------------------------------------------------- */
 class DatabaseQueryExecutor {
   constructor(private modelKey: ModelKey, private withPerf = false) { }
 
   private model(temp = 0.0) {
-    return new ChatOllama({
-      baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
-      model: this.modelKey,
+    return new ChatGroq({
+      apiKey: process.env.GROQ_API_KEY,
+      model: toGroqModel(String(this.modelKey), { purpose: "sql" }),
       temperature: temp,
-      keepAlive: "10m",
+      maxTokens: 1024,
     });
   }
 
-  private extractSQL(s: string): string | null {
-    const tryRe = [
-      /```sql\s*([\s\S]*?)```/i,
-      /```\s*(SELECT[\s\S]*?)```/i,
-      /^\s*(SELECT[\s\S]*?)\s*$/im,
-      /(SELECT[\s\S]*?);?\s*$/im,
-    ];
-    for (const re of tryRe) {
-      const m = s.match(re);
-      if (m?.[1]) {
-        const sql = m[1].trim().replace(/;$/, "");
-        if (/^SELECT\s/i.test(sql) && sql.length > 20) return sql;
+  private extractSQL(rawResponse: string): string | null {
+    const response = String(rawResponse || "").trim();
+
+    if (process.env.SQL_TOOL_DEBUG === "true") {
+      console.log(`[DEBUG] Raw SQL extraction input:`, JSON.stringify(response.substring(0, 200)));
+    }
+
+    // JSON-ish extraction attempt
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        let jsonStr = jsonMatch[0];
+        jsonStr = jsonStr.replace(/\\"/g, '"');
+        const parsed = JSON.parse(jsonStr);
+        if (parsed && typeof parsed.query === "string") {
+          let sql = parsed.query.trim();
+          sql = sql.replace(/;$/, "");
+          if (/^(SELECT|WITH)\s/i.test(sql) && sql.length > 20) return sql;
+        }
       }
+    } catch {
+      // ignore
+    }
+
+    // Code fences / common patterns
+    const patterns = [
+      /```sql\s*([\s\S]*?)\s*```/i,
+      /```\s*(SELECT[\s\S]*?)\s*```/i,
+      /(?:^|\n)\s*(SELECT\s+(?:DISTINCT\s+)?[\s\S]*?(?:LIMIT\s+\d+|$))/i,
+      /(?:^|\n)\s*(WITH\s+[\s\S]*?SELECT[\s\S]*?(?:LIMIT\s+\d+|$))/i,
+      /^\s*(SELECT[\s\S]*?)\s*;?\s*$/im,
+      /(SELECT[\s\S]*?)(?:\n\n|$)/i,
+    ];
+
+    for (const p of patterns) {
+      const m = response.match(p);
+      if (m?.[1]) {
+        let sql = m[1].trim().replace(/;$/, "");
+        sql = sql.replace(/\\"/g, '"').replace(/\\'/g, "'");
+        if (/^(SELECT|WITH)\s/i.test(sql) && sql.length > 20) {
+          if (process.env.SQL_TOOL_DEBUG === "true") console.log(`[DEBUG] Extracted SQL via pattern:`, sql.substring(0, 120));
+          return sql;
+        }
+      }
+    }
+
+    const selectMatch = response.match(/SELECT\s+[\s\S]*?(?:LIMIT\s+\d+|$)/i);
+    if (selectMatch) {
+      const sql = selectMatch[0].trim().replace(/;$/, "");
+      if (sql.length > 20) return sql;
+    }
+
+    if (process.env.SQL_TOOL_DEBUG === "true") {
+      console.log(`[DEBUG] Failed to extract SQL from response:`, response.substring(0, 200));
     }
     return null;
   }
@@ -605,13 +699,21 @@ class DatabaseQueryExecutor {
     if (!rows?.length) return "";
     try {
       const m = this.model(0.2);
-      const prompt = `Summarize 2-3 insights in business language.
+      const columns = Object.keys(rows[0] || {});
+      const sampleData = rows.slice(0, 3);
+      const prompt = `Analyze this database query result and provide 2-3 key business insights.
 
-Question: ${userMsg}
-Rows: ${rows.length}
-Sample: ${JSON.stringify(rows.slice(0, 2), null, 2)}
+      User Question: ${userMsg}
+      Total Rows: ${rows.length}
+      Columns: ${columns.join(', ')}
+      Sample Data: ${JSON.stringify(sampleData, null, 2)}
 
-Focus on key numbers, patterns, and actions. Keep it short:`;
+      Provide insights focusing on:
+      1. Key numbers and metrics
+      2. Notable patterns or trends
+      3. Business implications
+
+      Keep it concise and actionable:`;
       const r = await m.invoke([new HumanMessage(prompt)]);
       return String(r.content || "");
     } catch {
@@ -619,16 +721,45 @@ Focus on key numbers, patterns, and actions. Keep it short:`;
     }
   }
 
+  private normalizeTableList(input: any): string[] {
+    // Accept: string[], {name}, {table}, {table_name}, {TABLE_NAME}, or JSON string of the same
+    const raw = typeof input === "string" ? (() => { try { return JSON.parse(input); } catch { return []; } })() : input;
+    const arr: any[] = Array.isArray(raw) ? raw : [];
+    const names = arr.map((t) => {
+      if (typeof t === "string") return t;
+      if (t && typeof t === "object") {
+        return t.name || t.table || t.table_name || t.TABLE_NAME || Object.values(t).find(v => typeof v === "string");
+      }
+      return undefined;
+    }).filter((v): v is string => typeof v === "string");
+    // unique, lower-cased base for matching but store original
+    const dedup: string[] = [];
+    const seen = new Set<string>();
+    for (const n of names) {
+      const k = n.toLowerCase();
+      if (!seen.has(k)) { seen.add(k); dedup.push(n); }
+    }
+    return dedup;
+  }
+
   private async buildToolSQL(userMessage: string): Promise<{ table: string; sql: string }> {
     // 1) tables
     const tablesRaw: any = await listTables.invoke({ reasoning: `User asks: "${userMessage}"` });
-    const tables: string[] = Array.isArray(tablesRaw)
-      ? tablesRaw.map((t: any) => (typeof t === "string" ? t : t?.name)).filter(Boolean)
-      : JSON.parse(typeof tablesRaw === "string" ? tablesRaw : "[]");
+    const tables = this.normalizeTableList(tablesRaw);
+
+    if (!tables.length) throw new Error("No tables available");
+
     const lower = userMessage.toLowerCase();
-    const pick = (kw: string) => tables.find((t) => t.toLowerCase().includes(kw));
-    const table = pick("flight") || pick("airline") || pick("airport") || tables[0];
-    if (!table) throw new Error("No suitable table found");
+    const tryKw = (...kws: string[]) => tables.find((t) => {
+      const tl = t.toLowerCase();
+      return kws.some(kw => tl.includes(kw));
+    });
+
+    const table =
+      tryKw("flight", "flights") ||
+      tryKw("airline", "airlines", "carrier") ||
+      tryKw("airport", "airports") ||
+      tables[0];
 
     // 2) describe
     const descRaw: any = await describeTable.invoke({ table_name: table, include_indexes: false });
@@ -636,28 +767,54 @@ Focus on key numbers, patterns, and actions. Keep it short:`;
 
     // 3) generate SQL
     const m = this.model(0.1);
-    const prompt = `Generate a SELECT for: "${userMessage}"
+    const prompt = `Generate a MySQL SELECT query for: "${userMessage}"
 
 Table: ${table}
-Structure (use ONLY real columns):
+Structure (use ONLY real columns that exist in the structure below):
 ${desc}
 
-Rules:
-- Valid MySQL
-- LIMIT 50
-- Output ONLY SQL (no markdown, no prose)`;
+Requirements:
+- Valid MySQL syntax only
+- Use proper JOINs if needed
+- Add appropriate WHERE conditions
+- Include ORDER BY for logical sorting
+- Always add LIMIT 50
+- Output ONLY the SQL query (no markdown, no explanation, no JSON)
+
+SQL Query:`;
+
     const out = await m.invoke([new HumanMessage(prompt)]);
-    const sql = this.extractSQL(String(out.content)) || String(out.content).trim();
-    if (!/^SELECT\s/i.test(sql)) throw new Error("No valid SELECT generated");
+    const sql = this.extractSQL(String(out.content));
+
+    if (!sql || !/^(SELECT|WITH)\s/i.test(sql)) {
+      throw new Error("Failed to generate valid SQL query");
+    }
+
     return { table, sql };
   }
 
   async executeQuery(userMessage: string): Promise<DatabaseQueryResult> {
     const started = Date.now();
+
+    if (process.env.SQL_TOOL_DEBUG === "true") {
+      console.log(`[DEBUG] DatabaseQueryExecutor.executeQuery called with:`, userMessage);
+    }
+
     try {
       // Try tool path first
       const { sql } = await this.buildToolSQL(userMessage);
-      const execRaw: any = await executeSql.invoke({ sql_query: sql, explain_plan: false });
+
+      if (process.env.SQL_TOOL_DEBUG === "true") {
+        console.log(`[DEBUG] Generated SQL:`, sql);
+      }
+
+      const execRaw: any = await executeSql.invoke({
+        sql_query: sql,
+        explain_plan: false,
+        reasoning: `Executing query for: ${userMessage}`,
+        user_question: userMessage
+      });
+
       const result = typeof execRaw === "string" ? JSON.parse(execRaw) : execRaw;
 
       if (result?.success && result.data) {
@@ -672,35 +829,67 @@ Rules:
             : undefined,
         };
       }
-      // Fallback to legacy generation
+
+      console.warn("Tool execution failed:", result?.error);
       throw new Error(result?.error || "Tool execution failed");
-    } catch {
-      // Legacy path
+
+    } catch (toolError) {
+      console.warn("Tool path failed, trying legacy generation:", toolError);
+
       try {
         const m = this.model(0.0);
         const prompt = `${generateQueryPrompt(userMessage)}
 
 CONTEXT: "${userMessage}"
 REQUIREMENTS:
-- Output ONLY SQL (no markdown)
-- Must be a valid SELECT
-- Proper JOINs and WHERE
-- ORDER BY logically
+- Output ONLY a valid MySQL SELECT statement
+- No markdown, no JSON, no explanations
+- Must start with SELECT or WITH
+- Proper JOINs and WHERE clauses
+- Logical ORDER BY
 - LIMIT <= 100
 
 SQL:`;
-        const resp = await m.invoke([new SystemMessage(SYSTEM_PROMPTS.databaseExpert), new HumanMessage(prompt)]);
-        const sql = this.extractSQL(String(resp.content)) || String(resp.content).trim();
-        if (!/^SELECT\s/i.test(sql)) {
-          return { success: false, error: "Unable to generate valid SQL" };
+
+        const resp = await m.invoke([
+          new SystemMessage(SYSTEM_PROMPTS.databaseExpert),
+          new HumanMessage(prompt)
+        ]);
+
+        const sql = this.extractSQL(String(resp.content));
+
+        if (!sql || !/^(SELECT|WITH)\s/i.test(sql)) {
+          return {
+            success: false,
+            error: "Unable to generate valid SQL query",
+            sqlQuery: String(resp.content).substring(0, 200) + "..."
+          };
         }
-        const toolRaw: any = await executeSql.invoke({ sql_query: sql, explain_plan: this.withPerf });
+
+        if (process.env.SQL_TOOL_DEBUG === "true") {
+          console.log(`[DEBUG] Legacy generated SQL:`, sql);
+        }
+
+        const toolRaw: any = await executeSql.invoke({
+          sql_query: sql,
+          explain_plan: this.withPerf,
+          reasoning: `Legacy execution for: ${userMessage}`,
+          user_question: userMessage
+        });
+
         const parsed = typeof toolRaw === "string" ? JSON.parse(toolRaw) : toolRaw;
 
-        if (!parsed?.success || !parsed.data) return { success: false, sqlQuery: sql, error: parsed?.error || "No data returned" };
+        if (!parsed?.success || !parsed.data) {
+          return {
+            success: false,
+            sqlQuery: sql,
+            error: parsed?.error || "No data returned"
+          };
+        }
 
         const data = parsed.data as any[];
         const summary = await this.summarize(userMessage, data);
+
         return {
           success: true,
           data,
@@ -711,6 +900,7 @@ SQL:`;
             : undefined,
         };
       } catch (err: any) {
+        console.error("Both tool and legacy paths failed:", err);
         return {
           success: false,
           error: `Database query failed: ${err.message}`,
@@ -722,7 +912,7 @@ SQL:`;
 }
 
 /* -----------------------------------------------------------------------------
- * AIAgent (one path to build contexts & prompts; reused by all methods)
+ * AIAgent (Groq-powered)
  * -------------------------------------------------------------------------- */
 export class AIAgent {
   private cfg: Required<AgentConfig>;
@@ -733,18 +923,13 @@ export class AIAgent {
   constructor(cfg: Partial<AgentConfig> = {}) {
     this.cfg = { ...DEFAULT_CONFIG, ...cfg };
     this.debugMode = process.env.NODE_ENV === "development" || process.env.AGENT_DEBUG === "true";
-
-    // Initialize logger
+    initTools(this.cfg.modelKey);
     this.logger = (level: string, message: string, data?: any) => {
       if (!this.debugMode && level === 'debug') return;
-
       const timestamp = new Date().toISOString();
       const logData = data ? JSON.stringify(data, null, 2) : '';
-
       console.log(`[${timestamp}] [AIAgent:${level.toUpperCase()}] ${message}`);
-      if (logData) {
-        console.log(`[${timestamp}] [AIAgent:DATA]`, data);
-      }
+      if (logData) console.log(`[${timestamp}] [AIAgent:DATA]`, data);
     };
 
     this.logger('info', 'AIAgent initialized', {
@@ -775,25 +960,22 @@ export class AIAgent {
     }
   }
 
-  private model(opts?: { forceStreaming?: boolean }) {
+  private model(opts?: { forceStreaming?: boolean; purpose?: "chat" | "sql" | "rerank" | "fast" }) {
     const streaming = opts?.forceStreaming ?? this.cfg.streaming;
+    const chosen = toGroqModel(String(this.cfg.modelKey), { purpose: opts?.purpose ?? "chat" });
 
-    this.logger('debug', 'Creating model instance', {
-      model: this.cfg.modelKey,
+    this.logger('debug', 'Creating Groq model instance', {
+      model: chosen,
       temperature: this.cfg.temperature,
       streaming,
       contextWindow: this.cfg.contextWindow,
-      baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434"
     });
 
-    const m = AVAILABLE_MODELS[this.cfg.modelKey];
-    return new ChatOllama({
-      baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
-      model: this.cfg.modelKey,
+    return new ChatGroq({
+      apiKey: process.env.GROQ_API_KEY,
+      model: chosen,
       temperature: this.cfg.temperature,
-      streaming,
-      keepAlive: "10m",
-      numCtx: this.cfg.contextWindow,
+      maxTokens: this.cfg.maxTokens,
     });
   }
 
@@ -816,17 +998,17 @@ export class AIAgent {
         userId: user.id,
         rateLimitOk: success,
         authTime: Date.now() - start,
-        identifier: identifier.substring(0, 50) + '...' // Truncate for privacy
+        identifier: identifier.substring(0, 50) + '...'
       });
 
       return { user, rateLimitOk: success };
-    } catch (error) {
+    } catch (error: any) {
       this.logger('error', 'Authentication failed', { error: error.message });
       throw error;
     }
   }
 
-  /* ---------- context builder - modified to only cite KB sources ---------- */
+  /* ---------- context builder - only KB/Doc are citable ---------- */
   private async buildContextsAndPrompt(opts: {
     message: string;
     userName?: string;
@@ -881,10 +1063,11 @@ export class AIAgent {
 
             this.logger('info', 'Database query completed', {
               success: dbResult.success,
-              sqlQuery: dbResult.sqlQuery,
-              dataLength: dbResult.data?.length || 0,
-              summary: dbResult.summary?.substring(0, 100) + '...',
-              executionTime: Date.now() - taskStart
+              sqlQuery: dbResult.sqlQuery ?? '(none)',
+              dataLength: dbResult.data?.length ?? 0,
+              summary: dbResult.summary ? dbResult.summary.substring(0, 100) + '...' : '(none)',
+              error: dbResult.error ?? '(none)',
+              executionTime: Date.now() - taskStart,
             });
 
             if (dbResult.success && dbResult.data?.length) {
@@ -904,15 +1087,9 @@ export class AIAgent {
               };
               sources.push(sourceRef);
               (ctxs as any).database.sourceRef = sourceRef;
-
-              this.logger('debug', 'Database source reference created', {
-                sourceId: sourceRef.id,
-                rowCount: sourceRef.metadata.rowCount
-              });
             }
-          } catch (e) {
+          } catch (e: any) {
             this.logger('error', 'Database query failed', { error: e.message, stack: e.stack });
-            console.warn("DB query failed", e);
           } finally {
             taskTimings.database = Date.now() - taskStart;
           }
@@ -920,7 +1097,7 @@ export class AIAgent {
       );
     }
 
-    // Knowledge base search - CITABLE sources
+    // Knowledge base search - POTENTIAL CITABLE sources
     if (this.cfg.useKnowledgeBase && this.mm) {
       this.logger('info', 'Queuing knowledge base search task');
       tasks.push(
@@ -951,49 +1128,33 @@ export class AIAgent {
               const contextContent = search.documents.map((d) => d.pageContent).join("\n---\n").slice(0, 4000);
               (ctxs as any).knowledge = contextContent;
 
-              this.logger('debug', 'Knowledge context created', {
-                originalLength: search.documents.map(d => d.pageContent).join("\n---\n").length,
-                truncatedLength: contextContent.length
-              });
-
-              // Add KB sources as CITABLE references
               search.documents.forEach((doc, index) => {
                 const sourceRef: SourceReference = {
                   id: `kb-${Date.now()}-${index}`,
                   type: "knowledge_base",
-                  title: doc.metadata?.title || doc.metadata?.documentId || "Knowledge Base Entry",
-                  section: doc.metadata?.chunkType || "Content",
-                  pageNumber: doc.metadata?.pageNumber,
-                  snippet: doc.pageContent.slice(0, 200) + "...",
-                  relevanceScore: doc.metadata?.searchScore || 0.8,
+                  title: (doc as any).metadata?.title || (doc as any).metadata?.documentId || "Knowledge Base Entry",
+                  section: (doc as any).metadata?.chunkType || "Content",
+                  pageNumber: (doc as any).metadata?.pageNumber,
+                  snippet: (doc as any).pageContent.slice(0, 200) + "...",
+                  relevanceScore: (doc as any).metadata?.searchScore || 0.8,
                   metadata: {
-                    documentId: doc.metadata?.documentId,
-                    chunkIndex: doc.metadata?.chunkIndex,
-                    wordCount: doc.metadata?.wordCount,
+                    documentId: (doc as any).metadata?.documentId,
+                    chunkIndex: (doc as any).metadata?.chunkIndex,
+                    wordCount: (doc as any).metadata?.wordCount,
                   },
-                  timestamp: doc.metadata?.processingTimestamp,
+                  timestamp: (doc as any).metadata?.processingTimestamp,
                 };
                 sources.push(sourceRef);
                 citableSources.push(sourceRef);
-
-                this.logger('debug', 'KB source reference created', {
-                  sourceId: sourceRef.id,
-                  title: sourceRef.title,
-                  relevanceScore: sourceRef.relevanceScore
-                });
               });
 
               if (search.rerankingResults.length) {
                 allReranked.push(...search.rerankingResults);
                 rerankingApplied = true;
-                this.logger('debug', 'Reranking applied to KB results', {
-                  rerankingCount: search.rerankingResults.length
-                });
               }
             }
-          } catch (e) {
+          } catch (e: any) {
             this.logger('error', 'Knowledge base search failed', { error: e.message, stack: e.stack });
-            console.warn("KB search failed", e);
           } finally {
             taskTimings.knowledgeBase = Date.now() - taskStart;
           }
@@ -1012,21 +1173,14 @@ export class AIAgent {
           const taskStart = Date.now();
           try {
             if (!documentMeta) {
-              this.logger('debug', 'Processing general chat context...');
-
               // General chat - conversation history (not citable)
               const gk: GeneralChatKey = {
                 userId: userName || "user",
-                modelName: this.cfg.modelKey,
+                modelName: String(this.cfg.modelKey),
                 sessionId: sessionId || "default",
               };
 
               (ctxs as any).conversation = await this.mm!.readLatestGeneralChatHistory(gk);
-
-              this.logger('debug', 'General chat history loaded', {
-                hasHistory: !!(ctxs as any).conversation,
-                historyLength: (ctxs as any).conversation ? String((ctxs as any).conversation).length : 0
-              });
 
               if ((ctxs as any).conversation) {
                 const sourceRef: SourceReference = {
@@ -1042,13 +1196,9 @@ export class AIAgent {
                   },
                 };
                 sources.push(sourceRef);
-                this.logger('debug', 'Conversation source reference created', {
-                  sourceId: sourceRef.id
-                });
               }
 
-              // Similar conversations search
-              this.logger('debug', 'Searching similar conversations...');
+              // Similar conversations
               const similar = await this.mm!.searchSimilarConversations(
                 message,
                 gk.userId,
@@ -1064,27 +1214,20 @@ export class AIAgent {
                 .join("\n---\n")
                 .slice(0, 1500);
 
-              (ctxs as any).similar = similarConvs;
+              (ctxs as any).similar = similarConvs || "";
 
-              this.logger('debug', 'Similar conversations processed', {
-                totalFound: similar.documents?.length || 0,
-                filteredCount: similar.documents?.filter((d: any) => d.metadata?.chatSession !== gk.sessionId).length || 0,
-                finalLength: similarConvs.length
-              });
-
-              // Track similar conversation sources
               similar.documents?.forEach((doc, index) => {
-                if (doc.metadata?.chatSession !== gk.sessionId) {
+                if ((doc as any).metadata?.chatSession !== gk.sessionId) {
                   const sourceRef: SourceReference = {
                     id: `similar-${Date.now()}-${index}`,
                     type: "similar_chat",
                     title: "Similar Conversation",
-                    section: `Session: ${doc.metadata?.chatSession || "Unknown"}`,
-                    snippet: doc.pageContent.slice(0, 200) + "...",
-                    relevanceScore: doc.metadata?.searchScore,
+                    section: `Session: ${(doc as any).metadata?.chatSession || "Unknown"}`,
+                    snippet: (doc as any).pageContent.slice(0, 200) + "...",
+                    relevanceScore: (doc as any).metadata?.searchScore,
                     metadata: {
-                      chatSession: doc.metadata?.chatSession,
-                      timestamp: doc.metadata?.timestamp,
+                      chatSession: (doc as any).metadata?.chatSession,
+                      timestamp: (doc as any).metadata?.timestamp,
                     },
                   };
                   sources.push(sourceRef);
@@ -1094,31 +1237,18 @@ export class AIAgent {
               if (similar.rerankingResults.length) {
                 allReranked.push(...similar.rerankingResults);
                 rerankingApplied = true;
-                this.logger('debug', 'Reranking applied to similar conversations', {
-                  rerankingCount: similar.rerankingResults.length
-                });
               }
             } else {
-              this.logger('debug', 'Processing document chat context...', {
-                documentId: documentMeta.id,
-                documentTitle: documentMeta.title
-              });
-
-              // Document chat - document content IS citable
+              // Document chat
               const dk: DocumentKey = {
                 documentName: documentMeta.id,
                 userId: userName || "user",
-                modelName: this.cfg.modelKey,
+                modelName: String(this.cfg.modelKey),
               };
 
-              // Load conversation history
               (ctxs as any).conversation = await this.mm!.readLatestHistory(dk);
-              this.logger('debug', 'Document chat history loaded', {
-                hasHistory: !!(ctxs as any).conversation
-              });
 
               // Document content search - CITABLE
-              this.logger('debug', 'Searching document content...');
               const rel = await this.mm!.vectorSearch(
                 message,
                 documentMeta.id,
@@ -1128,16 +1258,10 @@ export class AIAgent {
                 this.cfg.rerankingThreshold
               );
 
-              this.logger('info', 'Document content search completed', {
-                documentsFound: rel.documents.length,
-                rerankingResults: rel.rerankingResults.length
-              });
-
               if (rel.documents.length > 0) {
-                (ctxs as any).knowledge = rel.documents?.map((d) => d.pageContent).join("\n") || "";
+                (ctxs as any).knowledge = rel.documents?.map((d: any) => d.pageContent).join("\n") || "";
 
-                // Add document sections as CITABLE sources
-                rel.documents?.forEach((doc, index) => {
+                rel.documents?.forEach((doc: any, index: number) => {
                   const sourceRef: SourceReference = {
                     id: `doc-${Date.now()}-${index}`,
                     type: "document",
@@ -1154,26 +1278,15 @@ export class AIAgent {
                   };
                   sources.push(sourceRef);
                   citableSources.push(sourceRef);
-
-                  this.logger('debug', 'Document source reference created', {
-                    sourceId: sourceRef.id,
-                    title: sourceRef.title,
-                    pageNumber: sourceRef.pageNumber,
-                    relevanceScore: sourceRef.relevanceScore
-                  });
                 });
 
                 if (rel.rerankingResults.length) {
                   allReranked.push(...rel.rerankingResults);
                   rerankingApplied = true;
-                  this.logger('debug', 'Reranking applied to document results', {
-                    rerankingCount: rel.rerankingResults.length
-                  });
                 }
               }
 
               // Similar document content - context only
-              this.logger('debug', 'Searching similar document content...');
               const sim = await this.mm!.vectorSearch(
                 (ctxs as any).conversation || "",
                 documentMeta.id,
@@ -1183,24 +1296,15 @@ export class AIAgent {
                 this.cfg.rerankingThreshold
               );
 
-              const simText = sim.documents?.map((d) => d.pageContent).join("\n") || "";
+              const simText = sim.documents?.map((d: any) => d.pageContent).join("\n") || "";
               (ctxs as any).similar = simText;
-
-              this.logger('debug', 'Similar document content processed', {
-                documentsFound: sim.documents?.length || 0,
-                contentLength: simText.length
-              });
 
               if (sim.rerankingResults.length) {
                 allReranked.push(...sim.rerankingResults);
-                this.logger('debug', 'Additional reranking applied to similar document content', {
-                  rerankingCount: sim.rerankingResults.length
-                });
               }
             }
-          } catch (e) {
+          } catch (e: any) {
             this.logger('error', 'Memory operations failed', { error: e.message, stack: e.stack });
-            console.warn("Memory ops failed", e);
           } finally {
             taskTimings.memory = Date.now() - taskStart;
           }
@@ -1217,27 +1321,11 @@ export class AIAgent {
     });
 
     // Truncate contexts
-    const preTruncationSizes = Object.entries(ctxs).reduce((acc, [key, value]) => {
-      acc[key] = typeof value === 'string' ? value.length : JSON.stringify(value).length;
-      return acc;
-    }, {} as Record<string, number>);
-
     const truncated = this.truncateContexts(ctxs, this.cfg.maxContextLength);
-
-    const postTruncationSizes = Object.entries(truncated).reduce((acc, [key, value]) => {
-      acc[key] = typeof value === 'string' ? value.length : JSON.stringify(value).length;
-      return acc;
-    }, {} as Record<string, number>);
-
-    this.logger('debug', 'Context truncation completed', {
-      preTruncation: preTruncationSizes,
-      postTruncation: postTruncationSizes,
-      maxContextLength: this.cfg.maxContextLength
-    });
 
     if (allReranked.length) (truncated as any).rerankedResults = allReranked;
 
-    // Build system prompt with proper citation mapping
+    // Build system prompt
     const promptStart = Date.now();
     const header = documentMeta
       ? `${SYSTEM_PROMPTS.documentChat}\nTitle: ${documentMeta.title}\nDescription: ${documentMeta.description || ""
@@ -1248,14 +1336,9 @@ export class AIAgent {
 
     let systemPrompt = header;
 
-    // Add citable sources with clear numbering
+    // Add potential citable sources
     if (citableSources.length > 0) {
-      this.logger('info', 'Adding citable sources to prompt', {
-        citableSourcesCount: citableSources.length,
-        sourceTypes: citableSources.map(s => s.type)
-      });
-
-      systemPrompt += `\n\nCITABLE SOURCE REFERENCES:\n`;
+      systemPrompt += `\n\nPOTENTIAL CITABLE SOURCE REFERENCES (ONLY CITE IF USED IN RESPONSE):\n`;
       citableSources.forEach((source, index) => {
         systemPrompt += `[${index + 1}] ${source.type.toUpperCase()}: ${source.title}`;
         if (source.section) systemPrompt += ` - ${source.section}`;
@@ -1265,67 +1348,64 @@ export class AIAgent {
 
       systemPrompt += `\nCITATION REQUIREMENTS:
 - Use [1], [2], [3], etc. to cite the numbered sources above
-- ONLY cite knowledge base entries and document content - these are factual sources
+- ONLY cite knowledge base entries and document content when they are directly used to form your response
 - DO NOT cite conversation history, chat context, or database results
 - Each factual claim should reference the appropriate numbered source
-- If no citable sources support your answer, don't use citations\n`;
+- If no citable sources are used in your response, do not include any citations
+- Ensure citations are accurate and correspond to the specific source content used\n`;
     } else {
-      this.logger('info', 'No citable sources available');
       systemPrompt += `\n\nNO CITABLE SOURCES AVAILABLE - Answer based on your knowledge without citations.\n`;
     }
 
-    // Add context content with clear labeling
     if (!documentMeta) {
       if ((truncated as any).database?.success && (truncated as any).database.data?.length) {
-        const sample = (truncated as any).database.data.slice(0, 5);
-        const summarySafe = String((truncated as any).database.summary || "").slice(0, 1200);
+        const data = (truncated as any).database.data;
+        const sqlQuery = (truncated as any).database.sqlQuery;
+        const summary = String((truncated as any).database.summary || "").slice(0, 1200);
+
+        const columns = data.length > 0 ? Object.keys(data[0]) : [];
+        const sampleRows = data.slice(0, 3);
+
         systemPrompt += `
 
-LIVE DATABASE RESULTS (USE FOR CONTEXT - DO NOT CITE):
-SQL: ${(truncated as any).database.sqlQuery}
-Rows: ${(truncated as any).database.data.length}
-Sample: ${JSON.stringify(sample, null, 2).slice(0, 1800)}
-Business Summary: ${summarySafe}
+LIVE DATABASE RESULTS (PRESENT AS TABLE - DO NOT CITE):
+SQL Query Executed: ${sqlQuery}
+Total Rows: ${data.length}
+Columns: ${columns.join(', ')}
 
-Use these real numbers in your answer but do not cite them with [#] references.`;
+Sample Data:
+${JSON.stringify(sampleRows, null, 2)}
 
-        this.logger('debug', 'Database context added to prompt', {
-          sqlQuery: (truncated as any).database.sqlQuery,
-          rowCount: (truncated as any).database.data.length,
-          sampleSize: sample.length,
-          summaryLength: summarySafe.length
-        });
+Business Summary: ${summary}
+
+IMPORTANT INSTRUCTIONS FOR DATABASE RESULTS:
+1. Present the data in a clear, well-formatted table
+2. Include all relevant columns from the query results
+3. Show meaningful row counts (display up to 20 rows, mention if more exist)
+4. Provide business insights based on the actual data
+5. Do NOT show the SQL query in your response - focus on the results
+6. Use the business summary to provide context
+7. Format numbers appropriately (currencies, percentages, etc.)
+8. Highlight key findings or patterns in the data
+
+Raw Data Available: ${JSON.stringify(data.slice(0, 10), null, 2)}`;
       }
     }
 
     if ((truncated as any).knowledge) {
       systemPrompt += `\n\nRELEVANT KNOWLEDGE CONTENT${rerankingApplied ? " (RERANKED)" : ""} (CITABLE WITH [#]):\n${(truncated as any).knowledge}`;
-      this.logger('debug', 'Knowledge content added to prompt', {
-        contentLength: (truncated as any).knowledge.length,
-        reranked: rerankingApplied
-      });
     }
 
     if ((truncated as any).similar) {
       systemPrompt += `\n\nRELATED CONTENT${rerankingApplied ? " (RERANKED)" : ""} (CONTEXT ONLY - DO NOT CITE):\n${(truncated as any).similar}`;
-      this.logger('debug', 'Similar content added to prompt', {
-        contentLength: (truncated as any).similar.length,
-        reranked: rerankingApplied
-      });
     }
 
     if ((truncated as any).conversation) {
       systemPrompt += `\n\nCONVERSATION HISTORY (CONTEXT ONLY - DO NOT CITE):\n${(truncated as any).conversation}`;
-      this.logger('debug', 'Conversation history added to prompt', {
-        contentLength: (truncated as any).conversation.length
-      });
     }
 
     if (additionalContext) {
       systemPrompt += `\n\nADDITIONAL CONTEXT (DO NOT CITE):\n${additionalContext}`;
-      this.logger('debug', 'Additional context added to prompt', {
-        contentLength: additionalContext.length
-      });
     }
 
     systemPrompt += `\n\nQuestion: ${message.trim()}`;
@@ -1364,34 +1444,16 @@ Use these real numbers in your answer but do not cite them with [#] references.`
 
     const t = { ...contexts };
     let total = 0;
-    const contextSizes: Record<string, number> = {};
 
-    Object.entries(t).forEach(([key, value]: [string, any]) => {
-      let size = 0;
-      if (typeof value === "string") {
-        size = value.length;
-      } else if (value?.summary) {
-        size = String(value.summary).length;
-      }
-      contextSizes[key] = size;
-      total += size;
+    Object.entries(t).forEach(([_key, value]: [string, any]) => {
+      if (typeof value === "string") total += value.length;
+      else if (value?.summary) total += String(value.summary).length;
     });
 
-    this.logger('debug', 'Context sizes before truncation', {
-      contextSizes,
-      total,
-      exceedsLimit: total > maxLength
-    });
-
-    if (total <= maxLength) {
-      this.logger('debug', 'No truncation needed');
-      return t;
-    }
+    if (total <= maxLength) return t;
 
     const priorities = ["database", "knowledge", "conversation", "similar"] as const;
     const target = Math.floor(maxLength * 0.9);
-
-    this.logger('debug', 'Truncating contexts', { target, priorities });
 
     for (const k of priorities) {
       if (typeof (t as any)[k] === "string") {
@@ -1399,43 +1461,17 @@ Use these real numbers in your answer but do not cite them with [#] references.`
         const allowance = Math.max(200, Math.floor(target * 0.3));
 
         if (text.length > allowance) {
-          const originalLength = text.length;
           const sentences = text.split(/[.!?]+/);
           let acc = "";
 
           for (const s of sentences) {
-            if ((acc + s + ".").length <= allowance) {
-              acc += s + ".";
-            } else {
-              break;
-            }
+            if ((acc + s + ".").length <= allowance) acc += s + ".";
+            else break;
           }
-
           (t as any)[k] = acc || text.slice(0, allowance);
-
-          this.logger('debug', `Truncated context: ${k}`, {
-            originalLength,
-            allowance,
-            newLength: (t as any)[k].length,
-            sentences: sentences.length,
-            usedSentences: acc.split(/[.!?]+/).length - 1
-          });
         }
       }
     }
-
-    // Log final sizes
-    const finalSizes = Object.entries(t).reduce((acc, [key, value]) => {
-      acc[key] = typeof value === 'string' ? value.length : JSON.stringify(value).length;
-      return acc;
-    }, {} as Record<string, number>);
-
-    this.logger('debug', 'Context truncation completed', {
-      originalSizes: contextSizes,
-      finalSizes,
-      totalReduction: total - Object.values(finalSizes).reduce((sum, size) => sum + size, 0)
-    });
-
     return t;
   }
 
@@ -1463,35 +1499,22 @@ Use these real numbers in your answer but do not cite them with [#] references.`
       enableDB: true,
     });
 
-    // Generate response
     const modelStart = Date.now();
-    this.logger('debug', 'Invoking model for response generation');
-
-    const resp = await this.model().invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
+    const model = this.model({ purpose: "chat" });
+    const resp = await model.invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
     const content = String(resp.content || "");
+    void modelStart; // (retain for debugging if needed)
 
-    const modelTime = Date.now() - modelStart;
-    this.logger('info', 'Model response generated', {
-      responseLength: content.length,
-      modelTime,
-      hasContent: !!content
-    });
-
-    // Validate citations
     const citationValidation = this.validateCitations(content, prep.citableSources);
-    this.logger('info', 'Citation validation completed', citationValidation);
-
-    // Log citation debug info
     this.logCitationDebug(prep, content);
 
-    // Save to memory
-    const memoryStart = Date.now();
-    if (this.cfg.useMemory && this.mm) {
-      this.logger('debug', 'Saving conversation to memory');
+    const citedSources = citationValidation.citedSourceIndices.map(index => prep.citableSources[index]);
 
+    // Save to memory
+    if (this.cfg.useMemory && this.mm) {
       const gk: GeneralChatKey = {
         userId: ctx.userId,
-        modelName: this.cfg.modelKey,
+        modelName: String(this.cfg.modelKey),
         sessionId: ctx.sessionId
       };
 
@@ -1503,30 +1526,15 @@ Use these real numbers in your answer but do not cite them with [#] references.`
       }
 
       await this.mm.writeToGeneralChatHistory(save, gk);
-
-      this.logger('debug', 'Memory save completed', {
-        memoryTime: Date.now() - memoryStart,
-        savedContent: save.length
-      });
     }
 
     const totalTime = Date.now() - totalStart;
 
-    this.logger('info', 'Chat response generation completed', {
-      totalExecutionTime: totalTime,
-      modelTime,
-      memoryTime: Date.now() - memoryStart,
-      responseLength: content.length,
-      citableSourcesCount: prep.citableSources.length,
-      validCitations: citationValidation.validCitations.length,
-      invalidCitations: citationValidation.invalidCitations.length
-    });
-
     return {
       content,
-      model: this.cfg.modelKey,
+      model: toGroqModel(String(this.cfg.modelKey), { purpose: "chat" }),
       executionTime: totalTime,
-      sources: prep.citableSources,
+      sources: citedSources,
       contexts: prep.truncated,
       metadata: {
         sessionId: ctx.sessionId || "",
@@ -1535,8 +1543,8 @@ Use these real numbers in your answer but do not cite them with [#] references.`
         contextSources: prep.sourceTypes,
         rerankingApplied: prep.rerankingApplied,
         totalContextTokens: prep.tokenCountEst + content.length,
-        sourceCount: prep.citableSources.length,
-        sourceTypes: prep.sourceTypes,
+        sourceCount: citedSources.length,
+        sourceTypes: [...new Set(citedSources.map((s) => s.type))],
         citationValidation,
       },
     };
@@ -1546,57 +1554,47 @@ Use these real numbers in your answer but do not cite them with [#] references.`
     validCitations: number[];
     invalidCitations: number[];
     totalCitationCount: number;
+    citedSourceIndices: number[];
   } {
-    this.logger('debug', 'Validating citations', {
-      contentLength: content.length,
-      citableSourcesCount: citableSources.length
-    });
-
-    // Extract all [#] citations from content
     const citationMatches = content.match(/\[(\d+)\]/g) || [];
     const citationNumbers = citationMatches.map(match => parseInt(match.replace(/[\[\]]/g, '')));
 
-    this.logger('debug', 'Citations extracted from content', {
-      citationMatches,
-      citationNumbers,
-      uniqueCitations: [...new Set(citationNumbers)]
-    });
-
     const validCitations: number[] = [];
     const invalidCitations: number[] = [];
+    const citedSourceIndices: number[] = [];
 
     citationNumbers.forEach(num => {
       if (num >= 1 && num <= citableSources.length) {
         validCitations.push(num);
+        citedSourceIndices.push(num - 1);
       } else {
         invalidCitations.push(num);
       }
     });
 
-    const result = {
+    return {
       validCitations: [...new Set(validCitations)],
       invalidCitations: [...new Set(invalidCitations)],
-      totalCitationCount: citationNumbers.length
+      totalCitationCount: citationNumbers.length,
+      citedSourceIndices: [...new Set(citedSourceIndices)],
     };
-
-    this.logger('info', 'Citation validation results', result);
-
-    if (result.invalidCitations.length > 0) {
-      this.logger('warn', 'Invalid citations detected', {
-        invalidCitations: result.invalidCitations,
-        availableRange: `1-${citableSources.length}`
-      });
-    }
-
-    return result;
   }
 
   private logCitationDebug(prep: any, content: string) {
     if (this.debugMode) {
+      const citationValidation = this.validateCitations(content, prep.citableSources);
+      const citedSources = citationValidation.citedSourceIndices.map((index: number) => prep.citableSources[index]);
       const citationData = {
         citableSourcesCount: prep.citableSources.length,
+        citedSourcesCount: citedSources.length,
         citableSources: prep.citableSources.map((s: any, i: number) => ({
           index: i + 1,
+          type: s.type,
+          title: s.title,
+          relevanceScore: s.relevanceScore
+        })),
+        citedSources: citedSources.map((s: any, i: number) => ({
+          index: citationValidation.citedSourceIndices[i] + 1,
           type: s.type,
           title: s.title,
           relevanceScore: s.relevanceScore
@@ -1607,7 +1605,6 @@ Use these real numbers in your answer but do not cite them with [#] references.`
         contextTypes: Object.keys(prep.truncated),
         rerankingApplied: prep.rerankingApplied
       };
-
       this.logger('debug', 'Citation debug information', citationData);
     }
   }
@@ -1632,7 +1629,6 @@ Use these real numbers in your answer but do not cite them with [#] references.`
       throw new Error("Document ID required");
     }
 
-    // Load document metadata
     const docLoadStart = Date.now();
     const doc = await prismadb.document.findUnique({
       where: { id: ctx.documentId },
@@ -1656,48 +1652,31 @@ Use these real numbers in your answer but do not cite them with [#] references.`
       userName: ctx.userId,
       sessionId: ctx.sessionId,
       additionalContext: documentContext,
-      documentMeta: { id: doc.id, title: doc.title, description: doc.description || "" },
+      documentMeta: { id: doc.id, title: doc.title, description: (doc as any).description || "" },
       enableDB: false,
     });
 
-    // Generate response
     const modelStart = Date.now();
-    this.logger('debug', 'Invoking model for document response generation');
-
-    const resp = await this.model().invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
+    const model = this.model({ purpose: "chat" });
+    const resp = await model.invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
     const content = String(resp.content || "");
+    void modelStart;
 
-    const modelTime = Date.now() - modelStart;
-    this.logger('info', 'Document model response generated', {
-      responseLength: content.length,
-      modelTime
-    });
-
-    // Validate citations
     const citationValidation = this.validateCitations(content, prep.citableSources);
     this.logCitationDebug(prep, content);
 
-    // Save to memory
-    const memoryStart = Date.now();
-    if (this.cfg.useMemory && this.mm) {
-      this.logger('debug', 'Saving document conversation to memory');
+    const citedSources = citationValidation.citedSourceIndices.map(index => prep.citableSources[index]);
 
+    if (this.cfg.useMemory && this.mm) {
       const dk: DocumentKey = {
         documentName: doc.id,
         userId: ctx.userId,
-        modelName: this.cfg.modelKey
+        modelName: String(this.cfg.modelKey)
       };
-
       await this.mm.writeToHistory(`User: ${message}\n`, dk);
       await this.mm.writeToHistory(`System: ${content}`, dk);
-
-      this.logger('debug', 'Document memory save completed', {
-        memoryTime: Date.now() - memoryStart
-      });
     }
 
-    // Save to database
-    const dbSaveStart = Date.now();
     try {
       await prismadb.document.update({
         where: { id: ctx.documentId },
@@ -1712,12 +1691,7 @@ Use these real numbers in your answer but do not cite them with [#] references.`
           },
         },
       });
-
-      this.logger('debug', 'Messages saved to database', {
-        dbSaveTime: Date.now() - dbSaveStart,
-        documentId: ctx.documentId
-      });
-    } catch (e) {
+    } catch (e: any) {
       this.logger('error', 'Failed to save messages to database', {
         error: e.message,
         documentId: ctx.documentId
@@ -1727,32 +1701,21 @@ Use these real numbers in your answer but do not cite them with [#] references.`
 
     const totalTime = Date.now() - totalStart;
 
-    this.logger('info', 'Document response generation completed', {
-      totalExecutionTime: totalTime,
-      modelTime,
-      memoryTime: Date.now() - memoryStart,
-      dbSaveTime: Date.now() - dbSaveStart,
-      responseLength: content.length,
-      citableSourcesCount: prep.citableSources.length,
-      validCitations: citationValidation.validCitations.length,
-      invalidCitations: citationValidation.invalidCitations.length
-    });
-
     return {
       content,
-      model: this.cfg.modelKey,
+      model: toGroqModel(String(this.cfg.modelKey), { purpose: "chat" }),
       executionTime: totalTime,
-      sources: prep.citableSources,
+      sources: citedSources,
       contexts: prep.truncated,
       metadata: {
-        sessionId: ctx.sessionId || ctx.documentId,
+        sessionId: ctx.sessionId || ctx.documentId!,
         dbQueryDetected: false,
         dbQueryConfidence: 0,
         contextSources: prep.sourceTypes,
         rerankingApplied: prep.rerankingApplied,
         totalContextTokens: prep.tokenCountEst + content.length,
-        sourceCount: prep.citableSources.length,
-        sourceTypes: prep.sourceTypes,
+        sourceCount: citedSources.length,
+        sourceTypes: [...new Set(citedSources.map((s) => s.type))],
         citationValidation,
       },
     };
@@ -1782,13 +1745,7 @@ Use these real numbers in your answer but do not cite them with [#] references.`
       enableDB: true,
     });
 
-    this.logger('debug', 'Context preparation completed for streaming', {
-      prepTime: Date.now() - streamStart,
-      systemPromptLength: prep.systemPrompt.length,
-      citableSourcesCount: prep.citableSources.length
-    });
-
-    const model = this.model({ forceStreaming: true });
+    const model = this.model({ forceStreaming: true, purpose: "chat" });
     const stream = await model.stream([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
 
     const mm = this.mm;
@@ -1796,17 +1753,17 @@ Use these real numbers in your answer but do not cite them with [#] references.`
     const logger = this.logger;
     const gk: GeneralChatKey = {
       userId: ctx.userId,
-      modelName: this.cfg.modelKey,
+      modelName: String(this.cfg.modelKey),
       sessionId: ctx.sessionId
     };
 
     if (cfg.useMemory && mm) {
-      this.logger('debug', 'Writing user message to memory for streaming');
       await mm.writeToGeneralChatHistory(`User: ${message}\n`, gk);
     }
 
     let chunkCount = 0;
     let totalContentLength = 0;
+    const self = this; // bind for validateCitations
 
     return new ReadableStream({
       async start(controller) {
@@ -1825,14 +1782,6 @@ Use these real numbers in your answer but do not cite them with [#] references.`
               controller.enqueue(encoder.encode(content));
               buffer += content;
               totalContentLength += content.length;
-
-              if (chunkCount % 10 === 0) { // Log every 10th chunk to avoid spam
-                logger('debug', 'Stream chunk processed', {
-                  chunkNumber: chunkCount,
-                  chunkLength: content.length,
-                  totalBufferLength: buffer.length
-                });
-              }
             }
           }
 
@@ -1857,10 +1806,7 @@ Use these real numbers in your answer but do not cite them with [#] references.`
         } finally {
           controller.close();
 
-          const memoryStart = Date.now();
           if (buffer.trim() && cfg.useMemory && mm) {
-            logger('debug', 'Saving streaming response to memory');
-
             let toSave = `Assistant: ${buffer.trim()}`;
             if ((prep.truncated as any).database?.success && (prep.truncated as any).database.sqlQuery) {
               toSave += `\n[Query: ${(prep.truncated as any).database.sqlQuery}]`;
@@ -1868,18 +1814,14 @@ Use these real numbers in your answer but do not cite them with [#] references.`
             if (prep.rerankingApplied) {
               toSave += `\n[Reranking applied: ${((prep.truncated as any).rerankedResults || []).length}]`;
             }
-
             await mm.writeToGeneralChatHistory(toSave, gk);
-
             logger('debug', 'Streaming response saved to memory', {
-              memoryTime: Date.now() - memoryStart,
               savedContentLength: toSave.length
             });
           }
 
-          // Validate citations for final response
           if (buffer.trim()) {
-            const citationValidation = this.validateCitations(buffer, prep.citableSources);
+            const citationValidation = self.validateCitations(buffer, prep.citableSources);
             logger('info', 'Final streaming response citation validation', {
               ...citationValidation,
               responseLength: buffer.length,
@@ -1890,7 +1832,6 @@ Use these real numbers in your answer but do not cite them with [#] references.`
       },
     });
   }
-
   /* ---------- misc helpers ---------- */
   async executeQuery(query: string): Promise<DatabaseQueryResult> {
     this.logger('info', 'Executing database query', { queryLength: query.length });
@@ -1909,7 +1850,7 @@ Use these real numbers in your answer but do not cite them with [#] references.`
       });
 
       return result;
-    } catch (error) {
+    } catch (error: any) {
       this.logger('error', 'Database query execution failed', {
         error: error.message,
         executionTime: Date.now() - queryStart
@@ -1921,8 +1862,8 @@ Use these real numbers in your answer but do not cite them with [#] references.`
   getModelInfo() {
     const conf = AVAILABLE_MODELS[this.cfg.modelKey];
     const info = {
-      id: this.cfg.modelKey,
-      name: conf.name,
+      id: String(this.cfg.modelKey),
+      name: conf?.name || toGroqModel(String(this.cfg.modelKey)),
       temperature: this.cfg.temperature,
       contextWindow: this.cfg.contextWindow,
       capabilities: {
@@ -1952,7 +1893,6 @@ Use these real numbers in your answer but do not cite them with [#] references.`
     });
 
     const rerankStart = Date.now();
-
     if (!this.mm) await this.initMemory();
 
     const docs = contexts.map(
@@ -1962,11 +1902,6 @@ Use these real numbers in your answer but do not cite them with [#] references.`
           metadata: typeof c === "object" ? c.metadata || {} : {},
         })
     );
-
-    this.logger('debug', 'Documents prepared for reranking', {
-      documentCount: docs.length,
-      avgPageContentLength: docs.reduce((sum, doc) => sum + doc.pageContent.length, 0) / docs.length
-    });
 
     try {
       const results = await this.mm!.rerankDocuments(
@@ -1985,7 +1920,7 @@ Use these real numbers in your answer but do not cite them with [#] references.`
       });
 
       return results;
-    } catch (error) {
+    } catch (error: any) {
       this.logger('error', 'Reranking failed', {
         error: error.message,
         executionTime: Date.now() - rerankStart
@@ -2029,16 +1964,16 @@ Use these real numbers in your answer but do not cite them with [#] references.`
       } else {
         checks.memory = { status: true, time: 0 };
       }
-    } catch (error) {
+    } catch (error: any) {
       checks.memory = { status: false, error: error.message };
     }
 
     // Model check
     try {
       const modelStart = Date.now();
-      const model = this.model();
+      this.model(); // build once
       checks.model = { status: true, time: Date.now() - modelStart };
-    } catch (error) {
+    } catch (error: any) {
       checks.model = { status: false, error: error.message };
     }
 
@@ -2048,14 +1983,14 @@ Use these real numbers in your answer but do not cite them with [#] references.`
         const dbStart = Date.now();
         await isDatabaseQuery("test query");
         checks.database = { status: true, time: Date.now() - dbStart };
-      } catch (error) {
+      } catch (error: any) {
         checks.database = { status: false, error: error.message };
       }
     }
 
     const failedChecks = Object.values(checks).filter(check => !check.status).length;
     const status = failedChecks === 0 ? 'healthy' :
-                  failedChecks <= 1 ? 'degraded' : 'unhealthy';
+      failedChecks <= 1 ? 'degraded' : 'unhealthy';
 
     const result = {
       status,
@@ -2068,8 +2003,9 @@ Use these real numbers in your answer but do not cite them with [#] references.`
     return result;
   }
 }
+
 /* -----------------------------------------------------------------------------
- * Factories & helpers (same names, slimmer bodies)
+ * Factories & helpers
  * -------------------------------------------------------------------------- */
 export const createChatAgent = (config?: Partial<AgentConfig>) =>
   new AIAgent({ useMemory: true, useKnowledgeBase: true, useDatabase: true, useReranking: true, ...config });
@@ -2078,7 +2014,7 @@ export const createDocumentAgent = (config?: Partial<AgentConfig>) =>
   new AIAgent({ useMemory: true, useDatabase: false, useKnowledgeBase: false, useReranking: true, ...config });
 
 export const createDatabaseAgent = (config?: Partial<AgentConfig>) =>
-  new AIAgent({ useMemory: false, useDatabase: true, useKnowledgeBase: false, useReranking: false, temperature: 0.0, modelKey: "MFDoom/deepseek-r1-tool-calling:7b", ...config });
+  new AIAgent({ useMemory: false, useDatabase: true, useKnowledgeBase: false, useReranking: false, temperature: 0.0, modelKey: "openai/gpt-oss-120b", ...config });
 
 export class ModernEmbeddingIntegration {
   private mm: MemoryManager;
@@ -2105,7 +2041,7 @@ export async function loadFile(fileUrl: string, documentId: string, cfg?: Partia
 }
 
 /* -----------------------------------------------------------------------------
- * Auth / errors / headers (unchanged API, cleaner internals)
+ * Auth / errors / headers
  * -------------------------------------------------------------------------- */
 export async function handleAuthAndRateLimit(request: Request): Promise<{ user: any; success: boolean; error?: NextResponse }> {
   try {
@@ -2137,7 +2073,7 @@ function toAsciiHeaderValue(value: string): string {
     .replace(/[–—]/g, "-")        // Em/en dashes to hyphens
     .replace(/[^\x20-\x7E]/g, "") // Remove any remaining non-ASCII chars
     .trim()
-    .slice(0, 200); // Limit header length to prevent issues
+    .slice(0, 200);
 }
 
 export function setAgentResponseHeaders(response: any, agentResponse: EnhancedAgentResponse): void {
@@ -2152,21 +2088,15 @@ export function setAgentResponseHeaders(response: any, agentResponse: EnhancedAg
     response.headers.set("X-Context-Sources", toAsciiHeaderValue(agentResponse.metadata.contextSources.join(",")));
     response.headers.set("X-Reranking-Applied", toAsciiHeaderValue(String(agentResponse.metadata.rerankingApplied)));
 
-    // Safe serialization for source-related headers
-    response.headers.set("X-Citable-Sources-Count", toAsciiHeaderValue(String(agentResponse.sources?.length || 0)));
+    response.headers.set("X-Cited-Sources-Count", toAsciiHeaderValue(String(agentResponse.sources?.length || 0)));
 
-    // Create safe source type list
     const sourceTypes = agentResponse.sources?.map(s => s.type).join(",") || "";
     response.headers.set("X-Source-Types", toAsciiHeaderValue(sourceTypes));
 
     if (dev) {
-      // Validate citations in the response
-      const agent = new AIAgent();
-      const citationValidation = agent.validateCitations(agentResponse.content, agentResponse.sources || []);
-
-      response.headers.set("X-Total-Citations", toAsciiHeaderValue(String(citationValidation.totalCitationCount)));
-      response.headers.set("X-Valid-Citations", toAsciiHeaderValue(citationValidation.validCitations.join(",")));
-      response.headers.set("X-Invalid-Citations", toAsciiHeaderValue(citationValidation.invalidCitations.join(",")));
+      response.headers.set("X-Total-Citations", toAsciiHeaderValue(String(agentResponse.metadata.citationValidation.totalCitationCount)));
+      response.headers.set("X-Valid-Citations", toAsciiHeaderValue(agentResponse.metadata.citationValidation.validCitations.join(",")));
+      response.headers.set("X-Invalid-Citations", toAsciiHeaderValue(agentResponse.metadata.citationValidation.invalidCitations.join(",")));
 
       if (agentResponse.metadata.totalContextTokens) {
         response.headers.set("X-Total-Context-Tokens", toAsciiHeaderValue(String(agentResponse.metadata.totalContextTokens)));
@@ -2184,24 +2114,23 @@ export function setAgentResponseHeaders(response: any, agentResponse: EnhancedAg
       response.headers.set("X-Avg-Relevance-Score", avg.toFixed(3));
     }
 
-    // Add safe source titles for debugging (dev only)
     if (dev && agentResponse.sources?.length > 0) {
       const safeTitles = agentResponse.sources
-        .slice(0, 3) // Limit to first 3 sources
+        .slice(0, 3)
         .map(s => toAsciiHeaderValue(s.title))
         .join("|");
-      response.headers.set("X-Source-Titles", safeTitles);
+      response.headers.set("X-Cited-Source-Titles", safeTitles);
     }
 
   } catch (error) {
     console.warn("Failed to set some response headers:", error);
-    // Set minimal safe headers
     response.headers.set("X-Model-Used", agentResponse.model || "unknown");
     response.headers.set("X-Processing-Time", `${agentResponse.executionTime || 0}ms`);
   }
 }
+
 /* -----------------------------------------------------------------------------
- * Validators (same API)
+ * Validators
  * -------------------------------------------------------------------------- */
 export const validateChatRequest = (body: any) => {
   const errors: string[] = [];
@@ -2256,14 +2185,14 @@ export const validateDatabaseRequest = (body: any) => {
   return {
     question: body.question?.trim(),
     directQuery: body.directQuery?.trim(),
-    model: body.model || "MFDoom/deepseek-r1-tool-calling:7b",
+    model: body.model || "groq/mixtral-8x7b-32768",
     returnRawData: !!body.returnRawData,
     errors,
   };
 };
 
 /* -----------------------------------------------------------------------------
- * Reranking analytics (optional – preserved API; simplified)
+ * Reranking analytics (optional)
  * -------------------------------------------------------------------------- */
 class RerankingAnalytics {
   private static instance: RerankingAnalytics;
@@ -2325,7 +2254,7 @@ class RerankingAnalytics {
 }
 
 /* -----------------------------------------------------------------------------
- * Initialization (same API)
+ * Initialization
  * -------------------------------------------------------------------------- */
 export async function initializeAgent(config: {
   agentConfig?: Partial<AgentConfig>;
@@ -2357,5 +2286,5 @@ export async function initializeAgent(config: {
 
 export default AIAgent;
 
-// Re-exports (unchanged)
+// Re-exports
 export { DATABASE_SCHEMA, AVAILABLE_MODELS, isDatabaseQuery, MemoryManager };

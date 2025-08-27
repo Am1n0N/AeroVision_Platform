@@ -1,7 +1,8 @@
 import prismadb from "@/lib/prismadb";
 import { auth, redirectToSignIn } from "@clerk/nextjs";
 import { redirect } from "next/navigation";
-import { ChatClient } from "./components/chat-client";
+
+import ChatClient from "@/components/document-chat";
 import PDFViewer from "@/components/pdfviewer";
 
 interface ChatIdPageProps {
@@ -39,7 +40,7 @@ const ChatIdPage = async ({params}:ChatIdPageProps) => {
     return (
     <div className="flex justify-center align-middle h-full w-full">
     <PDFViewer remoteUrl={document.fileUrl} />
-    <ChatClient document={document} />
+    <ChatClient document={document} initialMessages={document.messages ?? []} />
     </div>
 
 );

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Document, Page, pdfjs } from 'react-pdf';
 
-const PdfThumbnail = ({ pdfUrl }: { pdfUrl: string }) => {
+const PdfThumbnail = ({ pdfUrl }: { pdfUrl: string | null }) => {
   const [numPages, setNumPages] = useState<number | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [thumbnailWidth, setThumbnailWidth] = useState(300);

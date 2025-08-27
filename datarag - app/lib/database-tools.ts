@@ -16,7 +16,7 @@ import mysql, {
 import { z } from "zod";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { ToolMessage } from "@langchain/core/messages";
-
+import { wireGroqSqlRegenerator } from "@/lib/sql-regenerator-groq";
 // -----------------------------
 // Enhanced Database Configuration
 // -----------------------------
@@ -54,6 +54,11 @@ const getPool = (): Pool => {
   }
   return pool;
 };
+
+export function initTools(model: string) {
+  wireGroqSqlRegenerator(model);
+}
+
 
 // -----------------------------
 // Logging helpers
@@ -677,60 +682,152 @@ export const repairToMySQL = (sql: string): RepairResult => {
 // -----------------------------
 // Enhanced Query Extraction
 // -----------------------------
-// Enhanced Query Extraction with better JSON handling
+// -----------------------------
+// Enhanced Query Extraction
+// -----------------------------
 export const extractQuery = (raw: string): string => {
   const txt = String(raw || "").trim();
 
-  // Try JSON extraction with better error handling
-  try {
-    // Clean up common JSON formatting issues
-    let cleanedJson = txt;
-
-    // Remove extra closing braces at the end
-    cleanedJson = cleanedJson.replace(/}+\s*$/, '}');
-
-    // Remove leading/trailing non-JSON content
-    const jsonMatch = cleanedJson.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      cleanedJson = jsonMatch[0];
-    }
-
-    // Try to parse the cleaned JSON
-    const parsed = JSON.parse(cleanedJson);
-    if (parsed && typeof parsed.query === "string") {
-      return parsed.query.trim();
-    }
-  } catch (jsonError) {
-    // Log the JSON parsing error for debugging
-    log("JSON parsing failed:", jsonError, "Raw text:", txt.substring(0, 200));
+  if (process.env.SQL_TOOL_DEBUG === "true") {
+    log('=== EXTRACT QUERY DEBUG ===');
+    log('Raw input:', JSON.stringify(txt.substring(0, 200)));
+    log('Raw input ends with:', JSON.stringify(txt.substring(Math.max(0, txt.length - 50))));
   }
 
-  // Try code fence extraction
+  // Strategy 1: Simple regex for well-formed JSON
+  const simpleMatch = txt.match(/"query"\s*:\s*"([^"]+)"/);
+  if (simpleMatch) {
+    let query = simpleMatch[1].trim();
+
+    // Clean up any malformed endings
+    query = query.replace(/["}]+$/, '');
+    query = query.replace(/^["{]+/, '');
+
+    if (process.env.SQL_TOOL_DEBUG === "true") {
+      log('Simple regex match found:', JSON.stringify(query));
+    }
+
+    return query;
+  }
+
+  // Strategy 2: Handle complex queries with escaped content
+  try {
+    // Find the JSON structure
+    const jsonMatch = txt.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      let jsonStr = jsonMatch[0];
+
+      // Try to fix common JSON malformations
+      // Remove trailing quotes before closing braces
+      jsonStr = jsonStr.replace(/"(\s*})$/, '$1');
+
+      // Fix double quotes at the end of query values
+      jsonStr = jsonStr.replace(/"query"\s*:\s*"([^"]*(?:\\.[^"]*)*)"([^}]*)"([^}]*})/, '"query":"$1$2"$3');
+
+      try {
+        const parsed = JSON.parse(jsonStr);
+        if (parsed && typeof parsed.query === "string") {
+          let query = parsed.query.trim();
+
+          // Aggressively clean trailing junk
+          query = query.replace(/["}]+$/, '');
+          query = query.replace(/^["{]+/, '');
+
+          if (process.env.SQL_TOOL_DEBUG === "true") {
+            log('JSON parse successful:', JSON.stringify(query));
+          }
+
+          return query;
+        }
+      } catch (innerError) {
+        if (process.env.SQL_TOOL_DEBUG === "true") {
+          log("JSON parsing failed:", innerError);
+        }
+      }
+    }
+  } catch (jsonError) {
+    if (process.env.SQL_TOOL_DEBUG === "true") {
+      log("JSON extraction failed:", jsonError);
+    }
+  }
+
+  // Strategy 3: Aggressive regex extraction for malformed cases
+  const aggressiveMatch = txt.match(/"query"\s*:\s*"([\s\S]*?)"\s*[}"]*/);
+  if (aggressiveMatch) {
+    let query = aggressiveMatch[1].trim();
+
+    // Clean up common malformations
+    query = query.replace(/["}]+$/, '');
+    query = query.replace(/\\"/g, '"');
+    query = query.replace(/\\'/g, "'");
+
+    if (process.env.SQL_TOOL_DEBUG === "true") {
+      log('Aggressive regex match:', JSON.stringify(query));
+    }
+
+    return query;
+  }
+
+  // Strategy 4: Code fence extraction
   const sqlFence = txt.match(/```sql\s*([\s\S]*?)\s*```/i);
   if (sqlFence) return sqlFence[1].trim();
 
   const genericFence = txt.match(/```\s*([\s\S]*?)\s*```/);
   if (genericFence) return genericFence[1].trim();
 
-  // Try to find SQL statement directly
+  // Strategy 5: Direct SQL detection
   const sqlMatch = txt.match(/(SELECT|WITH|EXPLAIN|DESCRIBE|SHOW)[\s\S]*$/i);
   if (sqlMatch) {
     let sql = sqlMatch[0].trim();
 
-    // Remove trailing extra braces that might have been added
-    sql = sql.replace(/}+\s*$/, '');
+    // Remove trailing junk
+    sql = sql.replace(/["}]+$/, '');
+
+    if (process.env.SQL_TOOL_DEBUG === "true") {
+      log('Direct SQL match:', JSON.stringify(sql));
+    }
 
     return sql;
   }
 
-  // If all else fails, try to extract just the SQL from malformed JSON
-  const sqlInJsonMatch = txt.match(/"query"\s*:\s*"([^"]+)"/);
-  if (sqlInJsonMatch) {
-    return sqlInJsonMatch[1].trim();
+  // Final cleanup
+  let cleaned = txt.replace(/^["{]+/, '').replace(/["}]+$/, '');
+
+  if (process.env.SQL_TOOL_DEBUG === "true") {
+    log('Final fallback result:', JSON.stringify(cleaned));
   }
 
-  // Return original if no patterns match
-  return txt;
+  return cleaned;
+};
+
+// Alternative: More robust JSON parsing function
+export const safeJsonParse = (jsonString: string): any => {
+  try {
+    return JSON.parse(jsonString);
+  } catch (error) {
+    // Try to fix common JSON issues
+    let fixed = jsonString;
+
+    // Fix trailing commas
+    fixed = fixed.replace(/,(\s*[}\]])/g, '$1');
+
+    // Fix unescaped quotes in string values
+    fixed = fixed.replace(/"query"\s*:\s*"([^"]*(?:[^"\\]|\\.)*)"/g, (match, content) => {
+      // Only escape quotes that aren't already escaped
+      const escaped = content.replace(/(?<!\\)"/g, '\\"');
+      return `"query":"${escaped}"`;
+    });
+
+    // Remove any trailing quotes before closing brace
+    fixed = fixed.replace(/"\s*}$/, '}');
+
+    try {
+      return JSON.parse(fixed);
+    } catch (secondError) {
+      log('JSON parsing failed even after fixes:', secondError);
+      return null;
+    }
+  }
 };
 
 // -----------------------------
@@ -764,8 +861,8 @@ export const buildRegenerationPrompt = (
   const warningsSummary =
     validationResult.warnings.length > 0
       ? `\nWarnings to address:\n${validationResult.warnings
-          .map((warn) => `- ${warn.message}${warn.suggestion ? ` (Consider: ${warn.suggestion})` : ""}`)
-          .join("\n")}`
+        .map((warn) => `- ${warn.message}${warn.suggestion ? ` (Consider: ${warn.suggestion})` : ""}`)
+        .join("\n")}`
       : "";
 
   const feedback = `
@@ -864,7 +961,7 @@ export const listTables = new DynamicStructuredTool({
       });
 
       tablesCache.set(cacheKey, { tables: (tables as any[]).map((t: any) => t.name), timestamp: Date.now() });
-      return JSON.stringify(tables);
+      return JSON.stringify((tables as any[]).map((t: any) => t.name));
     } catch (error: any) {
       log("Error listing tables:", error?.message);
       return `Error listing tables: ${error?.message}. Please check database connectivity.`;

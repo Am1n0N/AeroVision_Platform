@@ -10,8 +10,8 @@ import {
   type SourceReference
 } from "@/lib/agent";
 import prismadb from "@/lib/prismadb";
-import { v4 as uuidv4 } from "uuid";
-import { AVAILABLE_MODELS, type ModelKey } from "@/config/models";
+import {v4 as uuidv4 } from "uuid";
+import {AVAILABLE_MODELS_LIST} from "@/config/models";
 
 function toAsciiHeaderValue(value: string): string {
   // Replace CR/LF with spaces, convert non-ASCII chars to safe alternatives
@@ -107,7 +107,7 @@ export async function POST(request: NextRequest) {
             id: uuidv4(),
             title: body.title || 'New Chat',
             userId: user.id,
-            modelKey: body.modelKey || 'MFDoom/deepseek-r1-tool-calling:7b',
+            modelKey: body.modelKey,
             useDatabase: body.useDatabase ?? true,
             useKnowledgeBase: body.useKnowledgeBase ?? true,
             temperature: body.temperature ?? 0.2,
@@ -141,7 +141,7 @@ export async function POST(request: NextRequest) {
           id: uuidv4(),
           title: 'New Chat', // Will be updated after we get the AI response
           userId: user.id,
-          modelKey: body.model || 'MFDoom/deepseek-r1-tool-calling:7b',
+          modelKey: body.model,
           useDatabase: body.enableDatabaseQueries ?? true,
           useKnowledgeBase: body.useKnowledgeBase ?? true,
           temperature: body.temperature ?? 0.2,
@@ -378,14 +378,7 @@ export async function GET(request: NextRequest) {
 
     if (action === 'models') {
       // Return available models (this would come from your config)
-      const models = [
-        "MFDoom/deepseek-r1-tool-calling:7b",
-        "deepseek-r1:8b",
-        "llama3.2:3b",
-        "llama3.2:8b",
-        "qwen2.5-coder:7b-instruct",
-        "mistral:7b"
-      ];
+      const models = AVAILABLE_MODELS_LIST
 
       return NextResponse.json({ models });
     }

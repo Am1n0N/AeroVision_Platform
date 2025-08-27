@@ -4,7 +4,7 @@ import { memo } from 'react';
 
 type Props = {
   file?: File | null;
-  remoteUrl?: string;
+  remoteUrl?: string | null;
 };
 
 const PDFViewer = memo(({ file, remoteUrl }: Props) => {
@@ -29,7 +29,7 @@ const PDFViewer = memo(({ file, remoteUrl }: Props) => {
               height={100}
               src="/pdf-placeholder.jpg"
               alt="PDF viewer"
-            />  
+            />
             <div className="absolute inset-0 flex items-center justify-center text-black">
               <span>Upload a file to preview</span>
             </div>

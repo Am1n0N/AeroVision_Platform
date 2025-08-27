@@ -1,5 +1,9 @@
-// hooks/useChat.ts — Robust streaming: handles JSON frames and <think> tags
-import { useState, useCallback, useRef, useMemo } from 'react';
+// hooks/useChat.ts — Robust streaming + settings-aware sessions + live settings sync
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
+
+/* ===============================
+   Shared Types
+================================= */
 
 interface ChatSession {
   id: string;
@@ -35,12 +39,8 @@ export interface ChatMessage {
   dbQueryUsed?: boolean;
   contextSources?: string;
   sources?: SourceReference[];
-
-  // NEW: extracted reasoning, never rendered inline
-  thinking?: string;
-
-  // NEW: UI hint while the server is still streaming
-  isStreaming?: boolean;
+  thinking?: string;     // extracted reasoning, never rendered inline
+  isStreaming?: boolean; // UI hint while server is still streaming
 }
 
 interface SessionDetail {
@@ -60,7 +60,169 @@ interface UseChatOptions {
   onSessionCreated?: (sessionId: string) => void;
 }
 
+/* ===============================
+   User Settings
+================================= */
+
+export interface UserSettings {
+  defaultModel: string;
+  defaultTemperature: number;
+  useDatabase: boolean;
+  useKnowledgeBase: boolean;
+  theme: "light" | "dark" | "system";
+  sidebarCollapsed: boolean;
+  showTokenCount: boolean;
+  showExecutionTime: boolean;
+  showSourceReferences: boolean;
+  maxContextLength: number;
+  rerankingThreshold: number;
+  enableReranking: boolean;
+}
+
+const DEFAULT_USER_SETTINGS: UserSettings = {
+  defaultModel: "openai/gpt-oss-20b",
+  defaultTemperature: 0.2,
+  useDatabase: true,
+  useKnowledgeBase: true,
+  theme: "system",
+  sidebarCollapsed: false,
+  showTokenCount: false,
+  showExecutionTime: false,
+  showSourceReferences: true,
+  maxContextLength: 6000,
+  rerankingThreshold: 0.5,
+  enableReranking: true,
+};
+
+type FetchOpts = { force?: boolean };
+
+export const useUserSettings = () => {
+  const [settings, setSettings] = useState<UserSettings>(DEFAULT_USER_SETTINGS);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // de-dupe / throttle guards
+  const inFlightRef = useRef(false);
+  const hasLoadedRef = useRef(false);
+  const lastFetchRef = useRef(0);
+  const MIN_INTERVAL_MS = 10_000; // 10s
+
+  const fetchSettings = useCallback(async (opts: FetchOpts = {}) => {
+    const now = Date.now();
+    if (inFlightRef.current) return;
+    if (!opts.force && hasLoadedRef.current) {
+      if (now - lastFetchRef.current < MIN_INTERVAL_MS) return;
+    }
+
+    inFlightRef.current = true;
+    setIsLoading(true);
+    try {
+      const res = await fetch("/api/settings", { method: "GET" });
+      lastFetchRef.current = Date.now();
+
+      if (!res.ok) { hasLoadedRef.current = true; return; }
+
+      const data = (await res.json()) as Partial<UserSettings>;
+      setSettings((prev) => ({ ...prev, ...data }));
+      hasLoadedRef.current = true;
+
+      // live-apply theme
+      if (data.theme) {
+        if (data.theme === "dark") document.documentElement.classList.add("dark");
+        else if (data.theme === "light") document.documentElement.classList.remove("dark");
+      }
+    } catch {
+      hasLoadedRef.current = true;
+    } finally {
+      inFlightRef.current = false;
+      setIsLoading(false);
+    }
+  }, []);
+
+  const updateSettings = useCallback(async (newSettings: Partial<UserSettings>) => {
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newSettings),
+      });
+      if (!res.ok) return false;
+      const updated = (await res.json()) as UserSettings;
+      setSettings(updated);
+      if (updated.theme) {
+        if (updated.theme === "dark") document.documentElement.classList.add("dark");
+        else if (updated.theme === "light") document.documentElement.classList.remove("dark");
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  return useMemo(
+    () => ({ settings, isLoading, fetchSettings, updateSettings }),
+    [settings, isLoading, fetchSettings, updateSettings]
+  );
+};
+
+/* ===============================
+   Models (unchanged)
+================================= */
+
+let modelsCache: any[] | null = null;
+let modelsFetchedAt = 0;
+let modelsInFlight: Promise<any[]> | null = null;
+const MODELS_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+export const useModels = () => {
+  const [models, setModels] = useState<any[]>(modelsCache ?? []);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetchModels = useCallback(async (opts?: { force?: boolean }) => {
+    const now = Date.now();
+
+    if (!opts?.force && modelsCache && now - modelsFetchedAt < MODELS_TTL_MS) {
+      setModels(modelsCache);
+      return modelsCache;
+    }
+
+    if (modelsInFlight) {
+      const data = await modelsInFlight;
+      setModels(data);
+      return data;
+    }
+
+    setIsLoading(true);
+    modelsInFlight = fetch("/api/chat?action=models", { method: "GET" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`models fetch failed: ${res.status}`);
+        const data = await res.json();
+        const list = Array.isArray(data?.models) ? data.models : [];
+        modelsCache = list;
+        modelsFetchedAt = Date.now();
+        return list;
+      })
+      .finally(() => { modelsInFlight = null; });
+
+    try {
+      const data = await modelsInFlight;
+      setModels(data);
+      return data;
+    } catch {
+      return modelsCache ?? [];
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  return useMemo(() => ({ models, isLoading, fetchModels }), [models, isLoading, fetchModels]);
+};
+
+/* ===============================
+   Chat Hook (settings-aware + live sync)
+================================= */
+
 export const useChat = (options: UseChatOptions = {}) => {
+  const { settings } = useUserSettings(); // <-- use user settings
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSession, setCurrentSession] = useState<SessionDetail | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -78,6 +240,15 @@ export const useChat = (options: UseChatOptions = {}) => {
 
   const { onError, onSessionCreated } = options;
 
+  // Derived defaults from settings (with hard fallback)
+  const FALLBACK_MODEL = "openai/gpt-oss-20b";
+  const DEFAULTS = useMemo(() => ({
+    model: settings?.defaultModel || FALLBACK_MODEL,
+    temperature: typeof settings?.defaultTemperature === 'number' ? settings.defaultTemperature : 0.2,
+    useKnowledgeBase: settings?.useKnowledgeBase ?? true,
+    useDatabase: settings?.useDatabase ?? true,
+  }), [settings]);
+
   // ---------------- Helpers ----------------
 
   const parseSourceReferences = (response: Response): SourceReference[] => {
@@ -91,7 +262,7 @@ export const useChat = (options: UseChatOptions = {}) => {
     }
   };
 
-  /** Stream-safe splitter for <think>…</think> in **plain text** streams */
+  /** Stream-safe splitter for <think>…</think> in plain text streams */
   function splitThinkTags(
     incoming: string,
     state: { buffer: string; inThink: boolean; visible: string; thinking: string }
@@ -100,21 +271,13 @@ export const useChat = (options: UseChatOptions = {}) => {
     while (state.buffer.length) {
       if (!state.inThink) {
         const openIdx = state.buffer.toLowerCase().indexOf('<think>');
-        if (openIdx === -1) {
-          state.visible += state.buffer;
-          state.buffer = '';
-          break;
-        }
+        if (openIdx === -1) { state.visible += state.buffer; state.buffer = ''; break; }
         state.visible += state.buffer.slice(0, openIdx);
         state.buffer = state.buffer.slice(openIdx + '<think>'.length);
         state.inThink = true;
       } else {
         const closeIdx = state.buffer.toLowerCase().indexOf('</think>');
-        if (closeIdx === -1) {
-          state.thinking += state.buffer;
-          state.buffer = '';
-          break;
-        }
+        if (closeIdx === -1) { state.thinking += state.buffer; state.buffer = ''; break; }
         state.thinking += state.buffer.slice(0, closeIdx);
         state.buffer = state.buffer.slice(closeIdx + '</think>'.length);
         state.inThink = false;
@@ -122,7 +285,6 @@ export const useChat = (options: UseChatOptions = {}) => {
     }
   }
 
-  /** Try to parse a JSON object with {content, thinking, sources} */
   function parseJsonFrame(raw: string): { content?: string; thinking?: string; sources?: SourceReference[] } | null {
     const trimmed = raw.trim();
     if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
@@ -210,7 +372,6 @@ export const useChat = (options: UseChatOptions = {}) => {
 
   // ---------------- Send / Stream message ----------------
 
-  // inside useChat.ts — replace your sendMessage implementation with this one
   const sendMessage = useCallback(async (
     message: string,
     sessionId?: string,
@@ -229,19 +390,11 @@ export const useChat = (options: UseChatOptions = {}) => {
 
     setIsLoading(true);
 
-    // --- pick the model (options > current session > localStorage > default)
-    const FALLBACK_MODEL = "deepseek-r1:7b";
-    let storedDefaultModel: string | undefined;
-    try {
-      storedDefaultModel = typeof window !== "undefined"
-        ? (localStorage.getItem("defaultModel") || undefined)
-        : undefined;
-    } catch { /* ignore */ }
-
+    // selected model: options > current session > user settings > hard fallback
     const selectedModel =
       options.model
       ?? currentSession?.modelKey
-      ?? storedDefaultModel
+      ?? DEFAULTS.model
       ?? FALLBACK_MODEL;
 
     // optimistic USER bubble
@@ -254,16 +407,17 @@ export const useChat = (options: UseChatOptions = {}) => {
 
     const firstInThread = !currentSession || currentSession.chatMessages.length === 0;
 
+    // If there's no session yet (or it's new), seed with settings-based defaults
     setCurrentSession(prev => {
       if (prev) return { ...prev, chatMessages: [...prev.chatMessages, userMsg] };
       return {
         id: '',
         title: 'New Chat',
         chatMessages: [userMsg],
-        modelKey: selectedModel,                   // <-- use selected model here
-        useDatabase: options.enableDatabaseQueries ?? true,
-        useKnowledgeBase: options.useKnowledgeBase ?? true,
-        temperature: options.temperature ?? 0.2,
+        modelKey: selectedModel,
+        useDatabase: options.enableDatabaseQueries ?? DEFAULTS.useDatabase,
+        useKnowledgeBase: options.useKnowledgeBase ?? DEFAULTS.useKnowledgeBase,
+        temperature: options.temperature ?? DEFAULTS.temperature,
         isPinned: false,
         isArchived: false,
       };
@@ -298,11 +452,20 @@ export const useChat = (options: UseChatOptions = {}) => {
       const body: any = {
         messages: [{ role: 'user', content: message.trim() }],
         sessionId: effectiveSessionId,
-        model: selectedModel,                      // <-- SEND selected model
-        modelKey: selectedModel,                   // <-- (also include modelKey for routes that expect it)
-        useKnowledgeBase: options.useKnowledgeBase ?? currentSession?.useKnowledgeBase ?? true,
-        enableDatabaseQueries: options.enableDatabaseQueries ?? currentSession?.useDatabase ?? true,
-        temperature: options.temperature ?? currentSession?.temperature ?? 0.2,
+        model: selectedModel,
+        modelKey: selectedModel,
+        useKnowledgeBase:
+          options.useKnowledgeBase
+          ?? currentSession?.useKnowledgeBase
+          ?? DEFAULTS.useKnowledgeBase,
+        enableDatabaseQueries:
+          options.enableDatabaseQueries
+          ?? currentSession?.useDatabase
+          ?? DEFAULTS.useDatabase,
+        temperature:
+          options.temperature
+          ?? currentSession?.temperature
+          ?? DEFAULTS.temperature,
       };
 
       const res = await fetch('/api/chat', {
@@ -321,11 +484,12 @@ export const useChat = (options: UseChatOptions = {}) => {
       const headerSources = parseSourceReferences(res);
 
       if (isNewSession && responseSessionId) {
-        options.onSessionCreated?.(responseSessionId as any);
+        options?.onSessionCreated; // noop to avoid TS unused param; we use the one from hook options
+        onSessionCreated?.(responseSessionId);
         await fetchSessions(false, true);
       }
 
-      // --- Streaming state machine (unchanged) ---
+      // --- Streaming state machine ---
       const reader = res.body?.getReader();
       const decoder = new TextDecoder();
 
@@ -465,7 +629,7 @@ export const useChat = (options: UseChatOptions = {}) => {
       setIsLoading(false);
       abortControllerRef.current = null;
     }
-  }, [isLoading, currentSession, onError, fetchSessions, fetchSession]);
+  }, [isLoading, currentSession, onError, fetchSessions, fetchSession, DEFAULTS, onSessionCreated]);
 
   // ---------------- Update session ----------------
 
@@ -508,10 +672,10 @@ export const useChat = (options: UseChatOptions = {}) => {
       const res = await fetch(`/api/chat?sessionId=${sessionId}&archive=${archive}`, { method: 'DELETE' });
       if (!res.ok) throw new Error(`Failed to ${archive ? 'archive' : 'delete'} session: ${res.statusText}`);
 
-      setSessions(prev => archive
-        ? prev.map(s => (s.id === sessionId ? { ...s, isArchived: true } : s))
-        : prev.filter(s => s.id !== sessionId)
-      );
+    setSessions(prev => archive
+      ? prev.map(s => (s.id === sessionId ? { ...s, isArchived: true } : s))
+      : prev.filter(s => s.id !== sessionId)
+    );
 
       if (currentSession?.id === sessionId) {
         setCurrentSession(null);
@@ -533,7 +697,7 @@ export const useChat = (options: UseChatOptions = {}) => {
     }
   }, []);
 
-  // ---------------- Create new session ----------------
+  // ---------------- Create new session (uses settings) ----------------
 
   const createNewSession = useCallback(async (opts?: {
     title?: string;
@@ -546,10 +710,10 @@ export const useChat = (options: UseChatOptions = {}) => {
       const body = {
         action: 'create',
         title: opts?.title || 'New Chat',
-        modelKey: opts?.model || 'MFDoom/deepseek-r1-tool-calling:7b',
-        useKnowledgeBase: opts?.useKnowledgeBase ?? true,
-        useDatabase: opts?.enableDatabaseQueries ?? true,
-        temperature: opts?.temperature ?? 0.2,
+        modelKey: opts?.model ?? DEFAULTS.model,
+        useKnowledgeBase: (opts?.useKnowledgeBase ?? DEFAULTS.useKnowledgeBase),
+        useDatabase: (opts?.enableDatabaseQueries ?? DEFAULTS.useDatabase),
+        temperature: (typeof opts?.temperature === 'number' ? opts.temperature : DEFAULTS.temperature),
       };
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -563,13 +727,127 @@ export const useChat = (options: UseChatOptions = {}) => {
       setSessions(prev => [newSession, ...prev]);
       setCurrentSession({ ...newSession, chatMessages: [] });
       requestTrackingRef.current.lastSessionFetch = newSession.id;
-      options.onSessionCreated?.(newSession.id);
+      onSessionCreated?.(newSession.id);
       return newSession.id;
     } catch (err) {
       onError?.(err as Error);
       throw err;
     }
-  }, [onError, options]);
+  }, [onError, onSessionCreated, DEFAULTS]);
+
+  // ---------------- Auto-sync settings → active session (safe) ----------------
+  // If user settings change, update the active session *iff* that field
+  // hasn't been customized (i.e., it still equals the previous settings).
+  const prevSettingsRef = useRef<{
+    model: string;
+    temperature: number;
+    useKnowledgeBase: boolean;
+    useDatabase: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    const nextSettings = {
+      model: DEFAULTS.model,
+      temperature: DEFAULTS.temperature,
+      useKnowledgeBase: DEFAULTS.useKnowledgeBase,
+      useDatabase: DEFAULTS.useDatabase,
+    };
+
+    // First run: initialize snapshot and sync blank local session
+    if (!prevSettingsRef.current) {
+      prevSettingsRef.current = nextSettings;
+
+      if (currentSession && currentSession.chatMessages.length === 0) {
+        setCurrentSession(prev =>
+          prev
+            ? {
+                ...prev,
+                modelKey: nextSettings.model,
+                temperature: nextSettings.temperature,
+                useKnowledgeBase: nextSettings.useKnowledgeBase,
+                useDatabase: nextSettings.useDatabase,
+              }
+            : prev
+        );
+      }
+      return;
+    }
+
+    if (!currentSession) {
+      prevSettingsRef.current = nextSettings;
+      return;
+    }
+
+    const prevSettings = prevSettingsRef.current;
+
+    const changed = {
+      model: prevSettings.model !== nextSettings.model,
+      temperature: prevSettings.temperature !== nextSettings.temperature,
+      useKnowledgeBase: prevSettings.useKnowledgeBase !== nextSettings.useKnowledgeBase,
+      useDatabase: prevSettings.useDatabase !== nextSettings.useDatabase,
+    };
+
+    const updates: Partial<SessionDetail> = {};
+
+    if (changed.model) {
+      const shouldApply =
+        currentSession.chatMessages.length === 0 || currentSession.modelKey === prevSettings.model;
+      if (shouldApply) updates.modelKey = nextSettings.model;
+    }
+
+    if (changed.temperature) {
+      const shouldApply =
+        currentSession.chatMessages.length === 0 || currentSession.temperature === prevSettings.temperature;
+      if (shouldApply) updates.temperature = nextSettings.temperature;
+    }
+
+    if (changed.useKnowledgeBase) {
+      const shouldApply =
+        currentSession.chatMessages.length === 0 || currentSession.useKnowledgeBase === prevSettings.useKnowledgeBase;
+      if (shouldApply) updates.useKnowledgeBase = nextSettings.useKnowledgeBase;
+    }
+
+    if (changed.useDatabase) {
+      const shouldApply =
+        currentSession.chatMessages.length === 0 || currentSession.useDatabase === prevSettings.useDatabase;
+      if (shouldApply) updates.useDatabase = nextSettings.useDatabase;
+    }
+
+    const hasUpdates = Object.keys(updates).length > 0;
+
+    if (hasUpdates) {
+      // Optimistic UI
+      setCurrentSession(prev => (prev ? { ...prev, ...updates } : prev));
+
+      // Keep list item in sync if model changed
+      if (updates.modelKey && currentSession.id) {
+        setSessions(prev =>
+          prev.map(s => (s.id === currentSession.id ? { ...s, modelKey: updates.modelKey as string } : s))
+        );
+      }
+
+      // Persist to backend if session exists
+      if (currentSession.id) {
+        updateSession(currentSession.id, updates as any).catch(() => {
+          /* non-fatal */
+        });
+      }
+    }
+
+    prevSettingsRef.current = nextSettings;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    currentSession?.id,
+    currentSession?.modelKey,
+    currentSession?.temperature,
+    currentSession?.useKnowledgeBase,
+    currentSession?.useDatabase,
+    currentSession?.chatMessages.length,
+    DEFAULTS.model,
+    DEFAULTS.temperature,
+    DEFAULTS.useKnowledgeBase,
+    DEFAULTS.useDatabase,
+  ]);
 
   // ---------------- Return ----------------
 
@@ -602,175 +880,4 @@ export const useChat = (options: UseChatOptions = {}) => {
     cancelRequest,
     createNewSession,
   ]);
-};
-
-// ---------------- User settings (unchanged) ----------------
-// hooks/useChat.ts — replace your existing useUserSettings with this version
-export interface UserSettings {
-  defaultModel: string;
-  defaultTemperature: number;
-  useDatabase: boolean;
-  useKnowledgeBase: boolean;
-  theme: "light" | "dark" | "system";
-  sidebarCollapsed: boolean;
-  showTokenCount: boolean;
-  showExecutionTime: boolean;
-  showSourceReferences: boolean;
-  maxContextLength: number;
-  rerankingThreshold: number;
-  enableReranking: boolean;
-}
-
-const DEFAULT_USER_SETTINGS: UserSettings = {
-  defaultModel: "deepseek-r1:7b",
-  defaultTemperature: 0.2,
-  useDatabase: true,
-  useKnowledgeBase: true,
-  theme: "system",
-  sidebarCollapsed: false,
-  showTokenCount: false,
-  showExecutionTime: false,
-  showSourceReferences: true,
-  maxContextLength: 6000,
-  rerankingThreshold: 0.5,
-  enableReranking: true,
-};
-
-type FetchOpts = { force?: boolean };
-
-export const useUserSettings = () => {
-  const [settings, setSettings] = useState<UserSettings>(DEFAULT_USER_SETTINGS);
-  const [isLoading, setIsLoading] = useState(false);
-
-  // de-dupe / throttle guards
-  const inFlightRef = useRef(false);
-  const hasLoadedRef = useRef(false);
-  const lastFetchRef = useRef(0);
-  const MIN_INTERVAL_MS = 10_000; // 10s – tweak as you like
-
-  const fetchSettings = useCallback(async (opts: FetchOpts = {}) => {
-    const now = Date.now();
-    if (inFlightRef.current) return;                 // already fetching
-    if (!opts.force && hasLoadedRef.current) {
-      if (now - lastFetchRef.current < MIN_INTERVAL_MS) return; // throttle
-    }
-
-    inFlightRef.current = true;
-    setIsLoading(true);
-    try {
-      const res = await fetch("/api/settings", { method: "GET" });
-      lastFetchRef.current = Date.now();
-
-      if (!res.ok) {
-        // If the route 404s, do not keep retrying in a tight loop
-        hasLoadedRef.current = true;
-        return;
-      }
-
-      const data = (await res.json()) as Partial<UserSettings>;
-      setSettings((prev) => ({ ...prev, ...data }));
-      hasLoadedRef.current = true;
-
-      // live-apply theme
-      if (data.theme) {
-        if (data.theme === "dark") document.documentElement.classList.add("dark");
-        else if (data.theme === "light") document.documentElement.classList.remove("dark");
-      }
-    } catch {
-      // keep defaults; avoid retry storm
-      hasLoadedRef.current = true;
-    } finally {
-      inFlightRef.current = false;
-      setIsLoading(false);
-    }
-  }, []);
-
-  const updateSettings = useCallback(async (newSettings: Partial<UserSettings>) => {
-    try {
-      const res = await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newSettings),
-      });
-      if (!res.ok) return false;
-      const updated = (await res.json()) as UserSettings;
-      setSettings(updated);
-      // live-apply theme
-      if (updated.theme) {
-        if (updated.theme === "dark") document.documentElement.classList.add("dark");
-        else if (updated.theme === "light") document.documentElement.classList.remove("dark");
-      }
-      return true;
-    } catch {
-      return false;
-    }
-  }, []);
-
-  return useMemo(
-    () => ({
-      settings,
-      isLoading,
-      fetchSettings,      // accepts { force?: boolean }
-      updateSettings,
-    }),
-    [settings, isLoading, fetchSettings, updateSettings]
-  );
-};
-
-
-// ---------------- Models (unchanged) ----------------
-let modelsCache: any[] | null = null;
-let modelsFetchedAt = 0;
-let modelsInFlight: Promise<any[]> | null = null;
-const MODELS_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
-export const useModels = () => {
-  const [models, setModels] = useState<any[]>(modelsCache ?? []);
-  const [isLoading, setIsLoading] = useState(false);
-
-  const fetchModels = useCallback(async (opts?: { force?: boolean }) => {
-    const now = Date.now();
-
-    // Serve fresh cache (unless forced)
-    if (!opts?.force && modelsCache && now - modelsFetchedAt < MODELS_TTL_MS) {
-      setModels(modelsCache);
-      return modelsCache;
-    }
-
-    // Join existing request if in flight
-    if (modelsInFlight) {
-      const data = await modelsInFlight;
-      setModels(data);
-      return data;
-    }
-
-    // Start a new request
-    setIsLoading(true);
-    modelsInFlight = fetch("/api/chat?action=models", { method: "GET" })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`models fetch failed: ${res.status}`);
-        const data = await res.json();
-        const list = Array.isArray(data?.models) ? data.models : [];
-        modelsCache = list;
-        modelsFetchedAt = Date.now();
-        console.log('Fetched models:', modelsInFlight);
-        return list;
-      })
-      .finally(() => {
-        modelsInFlight = null;
-      });
-
-    try {
-      const data = await modelsInFlight;
-      setModels(data);
-      return data;
-    } catch (e) {
-      // keep whatever we had; do not loop
-      return modelsCache ?? [];
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  return useMemo(() => ({ models, isLoading, fetchModels }), [models, isLoading, fetchModels]);
 };

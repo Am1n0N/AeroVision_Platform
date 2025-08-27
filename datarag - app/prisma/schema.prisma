@@ -11,7 +11,7 @@ model ChatSession {
   id               String    @id @default(cuid())
   title            String
   userId           String
-  modelKey         String    @default("deepseek-r1:7b")
+  modelKey         String    @default("openai/gpt-oss-20b")
   useDatabase      Boolean   @default(true)
   useKnowledgeBase Boolean   @default(true)
   temperature      Float     @default(0.2)

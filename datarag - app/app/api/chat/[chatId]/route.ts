@@ -175,7 +175,7 @@ ${recentMessages}
 
     // Configure & create agent
     const agentConfig: Partial<AgentConfig> = {
-      modelKey: "deepseek-r1:7b",
+      modelKey: "openai/gpt-oss-20b",
       temperature: 0.2,
       useMemory: true,
       useDatabase: false,
@@ -351,7 +351,7 @@ export async function GET(
         last_activity: document.messages[0]?.createdAt.toISOString(),
       },
       agent_info: {
-        model: "deepseek-r1:7b",
+        model: "openai/gpt-oss-20b",
         capabilities: [
           "document_analysis",
           "contextual_qa",
@@ -432,7 +432,7 @@ export async function DELETE(
       const documentKey = {
         documentName: params.chatId,
         userId: user.id,
-        modelName: "deepseek-r1:7b",
+        modelName: "openai/gpt-oss-20b",
       };
       // await memoryManager?.clearDocumentHistory?.(documentKey);
       logWithContext("info", "Memory clearing attempted", {
