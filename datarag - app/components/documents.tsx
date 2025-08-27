@@ -79,14 +79,14 @@ export const Documents = ({ data, displayMode }: DocumentsProps) => {
 
   const listView = (
     <div className="space-y-2">
-      <DocumentsTable data={data} columns={columns}/>
+      <DocumentsTable data={data} columns={columns} />
     </div>
   );
 
   return (
     <div>
       {displayMode === "grid" ? gridView : listView}
-      <DocumentDisplayToggle/>
+      <DocumentDisplayToggle />
     </div>
   );
 };

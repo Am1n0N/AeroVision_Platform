@@ -2,7 +2,6 @@ import { Categories } from "@/components/categories";
 import { Documents } from "@/components/documents";
 import { SearchInput } from "@/components/search-input";
 import prismadb from "@/lib/prismadb";
-
 interface RootPageProps {
   searchParams: {
     categoryId: string;

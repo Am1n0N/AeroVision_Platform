@@ -9,7 +9,7 @@ type Props = {
 
 const PDFViewer = memo(({ file, remoteUrl }: Props) => {
   return (
-    <div className="w-full">
+    <div className="w-full h-full pb-6">
       {remoteUrl ? (
         <iframe
           src={remoteUrl}

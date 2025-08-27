@@ -49,7 +49,7 @@ interface DocMessageLike {
   id?: string;
   role: Role;
   content: string;
-  createdAt?: string;
+  timestamp?: string;
   userId: string;
   documentId: string;
 }
@@ -77,7 +77,7 @@ async function copy(text?: string) {
   if (!text) return;
   try {
     await navigator.clipboard.writeText(text);
-  } catch {}
+  } catch { }
 }
 
 function useOutsideClick<T extends HTMLElement>(
@@ -99,6 +99,30 @@ function useOutsideClick<T extends HTMLElement>(
       document.removeEventListener("keydown", onEsc);
     };
   }, [ref, onOutside]);
+}
+
+/* ---- Timestamp ordering helpers ---------------------------------- */
+function toMillis(ts?: string): number {
+  if (!ts) return 0;
+  const t = Date.parse(ts);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/** Sort oldest → newest by createdAt, then by role (USER before SYSTEM), then by id */
+function sortDocMessages(list: DocMessageLike[]): DocMessageLike[] {
+  return [...list].sort((a, b) => {
+    const ta = toMillis(a.timestamp);
+    const tb = toMillis(b.timestamp);
+    if (ta !== tb) return ta - tb;
+
+    // Small tie-breaker: put USER before SYSTEM if same timestamp
+    const ra = a.role === "USER" ? 0 : 1;
+    const rb = b.role === "USER" ? 0 : 1;
+    if (ra !== rb) return ra - rb;
+
+    // Final tie-breaker: id lexicographic
+    return (a.id ?? "").localeCompare(b.id ?? "");
+  });
 }
 
 /* ---- REST calls to your backend ---------------------------------- */
@@ -477,15 +501,13 @@ const Messages: React.FC<{
           <Bubble
             role="SYSTEM"
             isLoading={false}
-            content={`Hello, I am **${document.title}**. ${
-              document.description || ""
-            }`}
+            content={`Hello, I am **${document.title}**. ${document.description || ""}`}
           />
         )}
 
         {messages.map((m, idx) => (
           <Bubble
-            key={m.id ?? `${m.role}-${idx}`}
+            key={`${m.timestamp ?? "0"}-${m.id ?? idx}`}
             role={m.role}
             content={m.content}
             isLoading={false}
@@ -565,7 +587,7 @@ const Composer: React.FC<{
 export default function ChatUnified({
   document,
   initialMessages = [],
-  afterDeleteHref = "/", // where to go after delete
+  afterDeleteHref = "/",
 }: {
   document: DocLike;
   initialMessages?: DocMessageLike[];
@@ -587,12 +609,15 @@ export default function ChatUnified({
     setInput,
   } = useCompletion({
     api: `/api/chat/${document.id}`,
+    streamProtocol: 'text',
     onFinish: (_prompt, full) => {
+      console.log("[ChatUnified] full completion:", full);
       const sys: DocMessageLike = {
         role: "SYSTEM",
         content: full,
         documentId: document.id,
         userId: document.userId,
+        timestamp: new Date().toISOString(), // ensure timestamp for ordering
       };
       setMessages((prev) => [...prev, sys]);
       setInput("");
@@ -601,6 +626,12 @@ export default function ChatUnified({
       console.error("[ChatUnified] useCompletion error:", err);
     },
   });
+
+
+
+
+  // Derived, always-ordered view of messages
+  const orderedMessages = useMemo(() => sortDocMessages(messages), [messages]);
 
   // Back-end integration for UPDATE
   async function handleUpdate(patch: { title?: string; description?: string }) {
@@ -612,7 +643,6 @@ export default function ChatUnified({
       setDocMeta((prev) => ({ ...prev, ...updated }));
     } catch (e) {
       console.error("Update failed:", e);
-      // simple rollback: re-fetch from server if needed; here we just no-op
     } finally {
       setBusy(null);
     }
@@ -641,13 +671,14 @@ export default function ChatUnified({
       content: trimmed,
       documentId: document.id,
       userId: document.userId,
+      timestamp: new Date().toISOString(), // ensure timestamp for ordering
     };
     setMessages((prev) => [...prev, userMsg]);
     completionSubmit(e);
   };
 
   return (
-    <div className="flex h-dvh w-full flex-col bg-gradient-to-b from-background to-background">
+    <div className="flex h-[90vh] w-full flex-col bg-gradient-to-b from-background to-background">
       <Header
         document={docMeta}
         messageCount={messages.length}
@@ -657,7 +688,7 @@ export default function ChatUnified({
 
       <Messages
         document={docMeta}
-        messages={messages}
+        messages={orderedMessages}
         isLoading={isLoading}
         streamingAssistant={completion}
       />

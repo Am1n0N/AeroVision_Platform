@@ -235,7 +235,7 @@ ${recentMessages}
           requestId,
           length: aiText?.length || 0,
         });
-        console.log("AI Response:", aiText);
+
 
         // Only save if there's meaningful content
         if (aiText && aiText.trim().length > 0) {
@@ -320,7 +320,7 @@ export async function GET(
     }
     const formattedMessages = document.messages.map((msg) => ({
       id: msg.id,
-      role: msg.role.toLowerCase(),
+      role: msg.role,
       content: msg.content,
       timestamp: msg.createdAt.toISOString(),
       userId: msg.userId,
