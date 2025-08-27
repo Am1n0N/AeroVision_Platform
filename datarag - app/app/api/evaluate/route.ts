@@ -1,590 +1,221 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { Readable } from 'stream';
-import { Ollama } from 'ollama';
-import fs from 'fs/promises';
-import path from 'path';
-import { performance } from 'perf_hooks';
-import process from 'process';
+// ============================================================================
+// app/api/evaluation/route.ts  (POST run | GET history)  — STREAMING READY
+// ============================================================================
 
-export const runtime = 'nodejs';
-export const maxDuration = 300; // 5 minutes timeout
+import { NextRequest, NextResponse } from "next/server";
+import { handleAuthAndRateLimit, createErrorResponse, createChatAgent } from "@/lib/agent";
+import prismadb from "@/lib/prismadb";
+import { EvaluationEngine, DEFAULT_EVALUATION_DATASET, EvaluationConfig } from "@/lib/eval/engine";
 
-interface DatasetItem {
-  input?: string;
-  expected_output?: string;
-  id?: string | number;
-}
+// If you deploy on Edge, remove this line; for Node streaming keep it:
+export const runtime = "nodejs";
 
-interface EvaluationMetrics {
-  relevance: number;
-  clarity: number;
-  coherence: number;
-  completeness: number;
-  overall_score: number;
-}
-
-interface GenerationResult {
-  content: string;
-  time: number;
-  memDelta: number;
-  memDetails?: {
-    rss: number;
-    heap: number;
-    external: number;
-    peak: number;
-  };
-  sources?: string[]; // For RAG responses
-}
-
-interface EvaluationResult {
-  message: string;
-  output: {
-    Relevance: number;
-    Clarity: number;
-    Coherence: number;
-    Completeness: number;
-    'Overall Score': number;
-    'Resp. Time (s)': number;
-    'Memory (MB)': number;
-    'Total Items': number;
-    'Valid Items': number;
-    'Success Rate (%)': number;
-  };
-  errors?: string[];
-}
-
-interface RAGConfig {
-  useKnowledgeBase: boolean;
-  maxKnowledgeResults?: number;
-}
-
-class OllamaEvaluator {
-  private cache = new Map<string, EvaluationMetrics>();
-  private readonly MAX_RETRIES = 3;
-  private readonly RETRY_DELAY = 1000; // 1 second
-
-  constructor(
-    private modelName: string,
-    private judgeModel: string,
-    private ragConfig?: RAGConfig,
-    private ollama = new Ollama({ host: 'http://localhost:11434' })
-  ) { }
-
-  private async delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  private async withRetry<T>(
-    operation: () => Promise<T>,
-    context: string
-  ): Promise<T> {
-    let lastError: Error;
-
-    for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
-      try {
-        return await operation();
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-
-        if (attempt < this.MAX_RETRIES) {
-          console.warn(`${context} failed (attempt ${attempt}/${this.MAX_RETRIES}):`, lastError.message);
-          await this.delay(this.RETRY_DELAY * attempt); // Exponential backoff
-        }
-      }
-    }
-
-    throw new Error(`${context} failed after ${this.MAX_RETRIES} attempts: ${lastError!.message}`);
-  }
-
-  private forceGarbageCollection(): void {
-    if (global.gc) {
-      try {
-        global.gc();
-      } catch (error) {
-        // Ignore GC errors
-      }
-    }
-  }
-
-  async generateResponse(prompt: string): Promise<GenerationResult> {
-    if (!prompt?.trim()) {
-      throw new Error('Prompt cannot be empty');
-    }
-
-    return this.withRetry(async () => {
-      // Force garbage collection and wait for it to complete
-      this.forceGarbageCollection();
-      await this.delay(100);
-
-      const memBefore = process.memoryUsage();
-      let peakMemory = memBefore.heapUsed;
-      const t0 = performance.now();
-
-      // Monitor memory during operation
-      const memoryMonitor = setInterval(() => {
-        const currentMem = process.memoryUsage().heapUsed;
-        peakMemory = Math.max(peakMemory, currentMem);
-      }, 50); // Check every 50ms
-
-      try {
-        let content: string;
-        let sources: string[] | undefined;
-
-        if (this.ragConfig?.useKnowledgeBase) {
-          // Use RAG-enhanced chat endpoint
-          const ragResponse = await this.generateRAGResponse(prompt.trim());
-          content = ragResponse.content;
-          sources = ragResponse.sources;
-        } else {
-          // Use direct Ollama chat
-          const res = await this.ollama.chat({
-            model: this.modelName,
-            messages: [{ role: 'user', content: prompt.trim() }],
-            options: {
-              temperature: 0.3,
-              top_p: 0.9,
-              num_predict: 2048, // Limit response length
-            },
-          });
-
-          if (!res?.message?.content) {
-            throw new Error('Empty response from model');
-          }
-
-          content = res.message.content.trim();
-        }
-
-        const time = (performance.now() - t0) / 1000;
-
-        // Clear memory monitor
-        clearInterval(memoryMonitor);
-
-        // Force garbage collection after operation
-        this.forceGarbageCollection();
-        await this.delay(100);
-
-        const memAfter = process.memoryUsage();
-
-        // Calculate various memory deltas
-        const memDeltas = {
-          rss: (memAfter.rss - memBefore.rss) / 1024 ** 2,
-          heap: (memAfter.heapUsed - memBefore.heapUsed) / 1024 ** 2,
-          external: (memAfter.external - memBefore.external) / 1024 ** 2,
-          peak: (peakMemory - memBefore.heapUsed) / 1024 ** 2
-        };
-
-        // Use the most significant positive memory change, fallback to peak usage
-        let memDelta = Math.max(
-          memDeltas.heap > 0 ? memDeltas.heap : 0,
-          memDeltas.peak > 0 ? memDeltas.peak : 0,
-          memDeltas.rss > 0 ? memDeltas.rss * 0.1 : 0, // RSS weighted lower
-          0.001 // Minimum non-zero value to show some activity
-        );
-
-        return {
-          content,
-          time,
-          memDelta: parseFloat(memDelta.toFixed(3)),
-          memDetails: {
-            rss: parseFloat(memDeltas.rss.toFixed(3)),
-            heap: parseFloat(memDeltas.heap.toFixed(3)),
-            external: parseFloat(memDeltas.external.toFixed(3)),
-            peak: parseFloat(memDeltas.peak.toFixed(3))
-          },
-          sources
-        };
-      } catch (error) {
-        clearInterval(memoryMonitor);
-        throw error;
-      }
-    }, `Generate response for model ${this.modelName}${this.ragConfig?.useKnowledgeBase ? ' (RAG-enhanced)' : ''}`);
-  }
-
-  private async generateRAGResponse(prompt: string): Promise<{ content: string; sources?: string[] }> {
-    try {
-      const response = await fetch('http://localhost:3000/api/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          prompt: prompt,
-          model: this.modelName,
-          useKnowledgeBase: this.ragConfig?.useKnowledgeBase || true,
-          maxKnowledgeResults: this.ragConfig?.maxKnowledgeResults || 5
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`RAG API responded with status: ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      if (!data?.response) {
-        throw new Error('Empty response from RAG API');
-      }
-
-      return {
-        content: data.response,
-        sources: data.sources || []
-      };
-    } catch (error) {
-      throw new Error(`RAG API call failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  private createJudgePrompt(query: string, response: string, expected: string, sources?: string[]): string {
-    const expectedSection = expected ? `\nExpected Output: """${expected}"""` : '';
-    const sourcesSection = sources && sources.length > 0
-      ? `\nSources Used: ${sources.join(', ')}`
-      : '';
-
-    return `You are an expert evaluator. Evaluate the response based on the following criteria:
-
-1. Relevance (40%): How well does the response address the query?
-2. Clarity (20%): How clear and understandable is the response?
-3. Coherence (15%): How logically structured and consistent is the response?
-4. Completeness (25%): How thoroughly does the response cover the topic?
-
-${sources && sources.length > 0 ? 'Note: This response was generated using additional knowledge sources.' : ''}
-
-Rate each criterion on a scale of 0 to 5, then calculate the weighted overall score.
-
-Return ONLY a valid JSON object in this exact format:
-{
-  "relevance": <number>,
-  "clarity": <number>,
-  "coherence": <number>,
-  "completeness": <number>,
-  "overall_score": <number>
-}
-
-Query: """${query}"""${expectedSection}${sourcesSection}
-Response to Evaluate: """${response}"""`;
-  }
-
-  private parseJudgeResponse(content: string): EvaluationMetrics {
-    try {
-      // Strip <think>...</think> if it exists
-      const sanitized = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-
-      const jsonMatch = sanitized.match(/\{[\s\S]*?\}/);
-      if (!jsonMatch) {
-        throw new Error(`No JSON found in judge response:\n--- RAW START ---\n${content}\n--- RAW END ---`);
-      }
-
-      const parsed = JSON.parse(jsonMatch[0]);
-
-      const required = ['relevance', 'clarity', 'coherence', 'completeness', 'overall_score'];
-      for (const field of required) {
-        if (typeof parsed[field] !== 'number' || parsed[field] < 0 || parsed[field] > 5) {
-          throw new Error(`Invalid ${field}: must be a number between 0 and 5`);
-        }
-      }
-
-      return parsed as EvaluationMetrics;
-    } catch (error) {
-      throw new Error(`Failed to parse judge response: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-
-  async evaluateWithJudge(query: string, response: string, expected = '', sources?: string[]): Promise<EvaluationMetrics> {
-    const sourcesKey = sources ? sources.join('|') : '';
-    const key = `${query}|${response}|${expected}|${sourcesKey}`;
-
-    if (this.cache.has(key)) {
-      return this.cache.get(key)!;
-    }
-
-    const result = await this.withRetry(async () => {
-      const prompt = this.createJudgePrompt(query, response, expected, sources);
-
-      const res = await this.ollama.chat({
-        model: this.judgeModel,
-        messages: [{ role: 'user', content: prompt }],
-        options: {
-          temperature: 0.1,
-          top_p: 0.9,
-          num_predict: 512,
-        },
-        stream: false, // ✅ Ensure not using stream when you don't want to see <think>
-        think: false,  // ✅ Critical to disable the <think> phase
-      });
-
-
-      if (!res?.message?.content) {
-        throw new Error('Empty response from judge model');
-      }
-
-      return this.parseJudgeResponse(res.message.content);
-    }, `Evaluate with judge model ${this.judgeModel}`);
-
-    this.cache.set(key, result);
-    return result;
-  }
-
-  clearCache(): void {
-    this.cache.clear();
-  }
-}
-
-async function loadDataset(datasetPath: string): Promise<DatasetItem[]> {
+export async function POST(request: NextRequest) {
   try {
-    const resolvedPath = path.resolve(datasetPath);
-    const raw = await fs.readFile(resolvedPath, 'utf-8');
-    const dataset = JSON.parse(raw);
+    const authResult = await handleAuthAndRateLimit(request);
+    if (!authResult.success) return authResult.error;
 
-    if (!Array.isArray(dataset)) {
-      throw new Error('Dataset must be an array');
-    }
+    const { searchParams } = new URL(request.url);
+    const wantsStream = searchParams.get("stream") === "1";
 
-    if (dataset.length === 0) {
-      throw new Error('Dataset cannot be empty');
-    }
-
-    return dataset;
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Failed to load dataset: ${error.message}`);
-    }
-    throw new Error('Failed to load dataset: Unknown error');
-  }
-}
-
-function createSSEStream(): { stream: Readable; push: (data: string) => void; end: () => void } {
-  const stream = new Readable({ read() { } });
-
-  const push = (data: string) => {
-    if (!stream.destroyed) {
-      stream.push(data);
-    }
-  };
-
-  const end = () => {
-    if (!stream.destroyed) {
-      stream.push(null);
-    }
-  };
-
-  return { stream, push, end };
-}
-
-export async function POST(req: NextRequest) {
-  let sse: ReturnType<typeof createSSEStream> | null = null;
-
-  try {
-    const body = await req.json();
+    const body = await request.json();
     const {
-      model,
-      judge,
-      datasetPath,
-      useKnowledgeBase = false,
-      maxKnowledgeResults = 5
-    } = body;
+      models = ["groq/llama-3.1-70b-versatile"],
+      embeddingModel = "nomic-embed-text",
+      testRetrieval = true,
+      testAugmentation = true,
+      testGeneration = true,
+      useJudgeLLM = true,
+      judgeModel = "groq/llama-3.1-70b-versatile",
+      topK = 5,
+      temperature = 0.2,
+      maxTokens = 2000,
+      dataset,
+    } = body ?? {};
 
-    // Validate required parameters
-    if (!model || typeof model !== 'string') {
-      return NextResponse.json({ error: 'Model name is required and must be a string' }, { status: 400 });
-    }
-
-    if (!judge || typeof judge !== 'string') {
-      return NextResponse.json({ error: 'Judge model name is required and must be a string' }, { status: 400 });
-    }
-
-    if (!datasetPath || typeof datasetPath !== 'string') {
-      return NextResponse.json({ error: 'Dataset path is required and must be a string' }, { status: 400 });
-    }
-
-    // Validate RAG parameters
-    if (typeof useKnowledgeBase !== 'boolean') {
-      return NextResponse.json({ error: 'useKnowledgeBase must be a boolean' }, { status: 400 });
-    }
-
-    if (typeof maxKnowledgeResults !== 'number' || maxKnowledgeResults < 1 || maxKnowledgeResults > 20) {
-      return NextResponse.json({ error: 'maxKnowledgeResults must be a number between 1 and 20' }, { status: 400 });
-    }
-
-    // Load and validate dataset
-    const dataset = await loadDataset(datasetPath);
-
-    // Create SSE stream
-    sse = createSSEStream();
-
-    const ragConfig: RAGConfig = {
-      useKnowledgeBase,
-      maxKnowledgeResults
+    const config: EvaluationConfig = {
+      models,
+      embeddingModel,
+      testRetrieval,
+      testAugmentation,
+      testGeneration,
+      useJudgeLLM,
+      judgeModel,
+      topK,
+      temperature,
+      maxTokens,
     };
 
-    const evaluator = new OllamaEvaluator(model, judge, ragConfig);
-    const total = dataset.length;
-    const errors: string[] = [];
+    const evaluationDataset =
+      Array.isArray(dataset) && dataset.length > 0 ? dataset : DEFAULT_EVALUATION_DATASET;
 
-    // Start evaluation process
-    (async () => {
-      try {
-        let sumRel = 0, sumCl = 0, sumCo = 0, sumComp = 0, sumOv = 0;
-        let sumTime = 0, sumMem = 0;
-        let validCount = 0;
-        let processedCount = 0;
+    // --- STREAMING BRANCH (SSE) ------------------------------------------------
+    if (wantsStream) {
+      const encoder = new TextEncoder();
 
-        // Send initial status
-        sse.push(`event: start\ndata: ${JSON.stringify({
-          total,
-          useRAG: useKnowledgeBase,
-          maxKnowledgeResults: useKnowledgeBase ? maxKnowledgeResults : null
-        })}\n\n`);
+      // Create the run *first* so UI can hydrate by runId during progress
+      const plannedTests = models.length * evaluationDataset.length;
+      const run = await prismadb.evaluationRun.create({
+        data: {
+          userId: authResult.user.id,
+          config: JSON.stringify(config),
+          results: JSON.stringify([]),
+          totalTests: plannedTests,
+          avgScore: 0,
+          executionTime: 0,
+        },
+      });
 
-        for (let i = 0; i < total; i++) {
+      const engine = new EvaluationEngine(config);
+      await engine.initializeMemory();
+
+      // Helpers for SSE
+      const sse = (obj: unknown) => `data: ${JSON.stringify(obj)}\n\n`;
+      const stream = new ReadableStream({
+        async start(controller) {
+          const push = (obj: unknown) => controller.enqueue(encoder.encode(sse(obj)));
+          const safeUpdate = async (allResults: any[]) => {
+            // best-effort persistence so refresh shows partial progress
+            try {
+              const avg =
+                allResults.reduce((s, r) => s + (r?.scores?.overall ?? 0), 0) /
+                Math.max(1, allResults.length);
+              const totalExec = allResults.reduce((s, r) => s + (r?.executionTime ?? 0), 0);
+              await prismadb.evaluationRun.update({
+                where: { id: run.id },
+                data: {
+                  results: JSON.stringify(allResults),
+                  avgScore: isFinite(avg) ? avg : 0,
+                  executionTime: totalExec,
+                },
+              });
+            } catch (e) {
+              // do not break stream on db hiccups
+              console.warn("[evaluation stream] partial save failed:", e);
+            }
+          };
+
+          // Announce meta
+          push({ type: "meta", runId: run.id, totalTests: plannedTests });
+
+          const allResults: any[] = [];
           try {
-            const item = dataset[i];
-            processedCount++;
+            for (const model of models as string[]) {
+              // Create an agent per model (mirrors engine.runEvaluation)
+              const agent = createChatAgent({
+                modelKey: model as any,
+                temperature: config.temperature,
+                maxTokens: config.maxTokens,
+                useMemory: true,
+                useKnowledgeBase: true,
+                useDatabase: true,
+                useReranking: true,
+              });
 
-            if (!item?.input?.trim()) {
-              errors.push(`Item ${i + 1}: Missing or empty input`);
-              continue;
+              for (const testCase of evaluationDataset) {
+                // Evaluate one test, stream it
+                const result = await (engine as any).evaluateTestCase(agent, testCase, model);
+                allResults.push(result);
+
+                // Send progress event
+                push({ type: "progress", result });
+
+                // Persist incrementally so UI can rehydrate mid-run
+                await safeUpdate(allResults);
+              }
             }
 
-            const query = item.input.trim();
-            const expected = item.expected_output?.trim() || '';
+            // Final save (optional but nice)
+            await safeUpdate(allResults);
 
-            // Generate response (either direct Ollama or RAG-enhanced)
-            const generation = await evaluator.generateResponse(query);
+            // Done event
+            push({ type: "done", runId: run.id });
 
-            // Evaluate with judge
-            const evaluation = await evaluator.evaluateWithJudge(
-              query,
-              generation.content,
-              expected,
-              generation.sources
-            );
-
-            // Accumulate metrics
-            sumRel += evaluation.relevance;
-            sumCl += evaluation.clarity;
-            sumCo += evaluation.coherence;
-            sumComp += evaluation.completeness;
-            sumOv += evaluation.overall_score;
-            sumTime += generation.time;
-            sumMem += generation.memDelta;
-            validCount++;
-
-            // Send item completion update with memory details
-            sse.push(`event: item\ndata: ${JSON.stringify({
-              index: i,
-              query: query.substring(0, 50) + (query.length > 50 ? '...' : ''),
-              score: evaluation.overall_score,
-              time: generation.time,
-              memory: generation.memDelta,
-              memDetails: generation.memDetails,
-              sources: generation.sources?.length || 0
-            })}\n\n`);
-
-          } catch (error) {
-            const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-            errors.push(`Item ${i + 1}: ${errorMsg}`);
-
-            // Send error update
-            sse.push(`event: item_error\ndata: ${JSON.stringify({
-              index: i,
-              error: errorMsg
-            })}\n\n`);
+            controller.close();
+          } catch (err: any) {
+            push({ type: "error", message: err?.message || "unknown error", runId: run.id });
+            controller.close();
           }
+        },
+      });
 
-          // Send progress update
-          const progress = Math.floor((processedCount / total) * 100);
-          sse.push(`event: progress\ndata: ${JSON.stringify({
-            progress,
-            processed: processedCount,
-            valid: validCount,
-            errors: errors.length
-          })}\n\n`);
-        }
-
-        if (validCount === 0) {
-          sse.push(`event: error\ndata: ${JSON.stringify({
-            error: 'No valid items could be processed',
-            errors
-          })}\n\n`);
-          sse.end();
-          return;
-        }
-
-        // Calculate final results
-        const avg = (sum: number) => parseFloat((sum / validCount).toFixed(3));
-        const successRate = parseFloat(((validCount / total) * 100).toFixed(2));
-
-        const result: EvaluationResult = {
-          message: `Evaluation completed successfully${useKnowledgeBase ? ' with RAG enhancement' : ''}.`,
-          output: {
-            Relevance: avg(sumRel),
-            Clarity: avg(sumCl),
-            Coherence: avg(sumCo),
-            Completeness: avg(sumComp),
-            'Overall Score': avg(sumOv),
-            'Resp. Time (s)': avg(sumTime),
-            'Memory (MB)': avg(sumMem),
-            'Total Items': total,
-            'Valid Items': validCount,
-            'Success Rate (%)': successRate,
-          }
-        };
-
-        if (errors.length > 0) {
-          result.errors = errors;
-        }
-
-        sse.push(`event: done\ndata: ${JSON.stringify(result)}\n\n`);
-        sse.end();
-
-      } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : 'Unknown error occurred';
-        sse.push(`event: error\ndata: ${JSON.stringify({ error: errorMsg })}\n\n`);
-        sse.end();
-      } finally {
-        // Clean up
-        evaluator.clearCache();
-
-        // Final garbage collection
-        if (global.gc) {
-          try {
-            global.gc();
-          } catch (error) {
-            // Ignore GC errors
-          }
-        }
-      }
-    })();
-
-    return new Response(sse.stream, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache, no-transform',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      }
-    });
-
-  } catch (error) {
-    console.error('Evaluation API error:', error);
-
-    if (sse) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      sse.push(`event: error\ndata: ${JSON.stringify({ error: errorMsg })}\n\n`);
-      sse.end();
-
-      return new Response(sse.stream, {
+      return new NextResponse(stream, {
         headers: {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-        }
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          // Helpful for Vercel/Node proxies:
+          "X-Accel-Buffering": "no",
+        },
       });
     }
 
-    const errorMsg = error instanceof Error ? error.message : 'Internal server error';
-    return NextResponse.json({ error: errorMsg }, { status: 500 });
+    // --- NON-STREAMING BRANCH (legacy/fallback) --------------------------------
+    const engine = new EvaluationEngine(config);
+    const results = await engine.runEvaluation(evaluationDataset);
+
+    // Persist run (best-effort)
+    let runId: string | null = null;
+    try {
+      const run = await prismadb.evaluationRun.create({
+        data: {
+          userId: authResult.user.id,
+          config: JSON.stringify(config),
+          results: JSON.stringify(results),
+          totalTests: results.length,
+          avgScore:
+            results.reduce((s, r) => s + r.scores.overall, 0) / Math.max(1, results.length),
+          executionTime: results.reduce((s, r) => s + r.executionTime, 0),
+        },
+      });
+      runId = run.id;
+    } catch (dbErr) {
+      console.warn("[evaluation] failed to save run:", dbErr);
+    }
+
+    return NextResponse.json({
+      success: true,
+      runId,
+      results,
+      summary: {
+        totalTests: results.length,
+        modelsEvaluated: models.length,
+        avgOverallScore:
+          results.reduce((s, r) => s + r.scores.overall, 0) / Math.max(1, results.length),
+        avgExecutionTime:
+          results.reduce((s, r) => s + r.executionTime, 0) / Math.max(1, results.length),
+      },
+    });
+  } catch (error: unknown) {
+    console.error("[evaluation POST]", error);
+    return createErrorResponse(error);
+  }
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    const authResult = await handleAuthAndRateLimit(request);
+    if (!authResult.success) return authResult.error;
+
+    const runs = await prismadb.evaluationRun.findMany({
+      where: { userId: authResult.user.id },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    });
+
+    return NextResponse.json({
+      success: true,
+      evaluationRuns: runs.map((run) => ({
+        id: run.id,
+        createdAt: run.createdAt,
+        totalTests: run.totalTests,
+        avgScore: run.avgScore,
+        executionTime: run.executionTime,
+        config: JSON.parse(run.config),
+      })),
+    });
+  } catch (error: unknown) {
+    console.error("[evaluation GET history]", error);
+    return createErrorResponse(error);
   }
 }

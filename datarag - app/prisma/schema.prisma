@@ -7,6 +7,9 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/* ---------------------------
+   Core Chat Models
+--------------------------- */
 model ChatSession {
   id               String    @id @default(cuid())
   title            String
@@ -32,7 +35,7 @@ model ChatSession {
 model ChatMessage {
   id             String   @id @default(cuid())
   content        String   @db.Text
-  role           String // USER, ASSISTANT, SYSTEM
+  role           String   // USER, ASSISTANT, SYSTEM
   sessionId      String
   userId         String
   modelUsed      String?
@@ -74,6 +77,9 @@ model MessageSource {
   @@map("message_sources")
 }
 
+/* ---------------------------
+   Documents & Categories
+--------------------------- */
 model Category {
   id        String     @id @default(uuid())
   name      String     @unique
@@ -90,13 +96,13 @@ model Document {
   fileUrl     String?  @db.Text
   userId      String
   status      String   @default("PROCESSING") // PROCESSING, COMPLETED, ERROR
-  errorReason String?  @db.Text // Store error details if processing fails
+  errorReason String?  @db.Text              // Store error details if processing fails
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  // Relations
   category   Category          @relation(fields: [categoryId], references: [id])
   categoryId String
-  // Relations
   messages   DocumentMessage[]
   chunks     DocumentChunk[]
 
@@ -133,7 +139,7 @@ model DocumentChunk {
   chunkType     String?  @default("text")
   wordCount     Int?
   tokenEstimate Int?
-  vectorId      String?  @unique // Make unique for better indexing
+  vectorId      String?  @unique // Unique for vector DB backrefs
   metadata      String?  @db.Text
   createdAt     DateTime @default(now())
 
@@ -142,14 +148,13 @@ model DocumentChunk {
 
   @@index([documentId])
   @@index([chunkIndex])
-  @@index([vectorId])
   @@index([documentId, chunkIndex])
   @@map("document_chunks")
 }
 
-// ==========================================
-// Enhanced Knowledge Base with Better Indexing
-// ==========================================
+/* -----------------------------------------
+   Knowledge Base (with tags & full-text)
+----------------------------------------- */
 model KnowledgeBaseEntry {
   id        String   @id @default(cuid())
   title     String   @db.VarChar(500)
@@ -157,7 +162,7 @@ model KnowledgeBaseEntry {
   category  String?  @db.VarChar(100)
   userId    String?
   isPublic  Boolean  @default(true)
-  vectorId  String?  @unique // Make unique for better vector search
+  vectorId  String?  @unique
   metadata  String?  @db.Text
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -171,7 +176,7 @@ model KnowledgeBaseEntry {
   @@index([userId, isPublic])
   @@index([category, isPublic])
   @@index([createdAt])
-  @@fulltext([title, content]) // Enable full-text search
+  @@fulltext([title, content])
   @@map("knowledge_base_entries")
 }
 
@@ -186,6 +191,9 @@ model KnowledgeBaseTag {
   @@map("knowledge_base_tags")
 }
 
+/* ---------------------------
+   Query History & Settings
+--------------------------- */
 model QueryHistory {
   id            String   @id @default(cuid())
   userId        String
@@ -241,4 +249,80 @@ model AnalyticsEvent {
   @@index([timestamp])
   @@index([eventType, timestamp])
   @@map("analytics_events")
+}
+
+/* ---------------------------
+   Evaluation & Metrics
+--------------------------- */
+model EvaluationRun {
+  id            String   @id @default(cuid())
+  userId        String
+  config        String   @db.Text      // JSON config
+  results       String   @db.LongText  // JSON results
+  totalTests    Int
+  avgScore      Float
+  executionTime Int                   // ms
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("evaluation_runs")
+}
+
+model EvaluationDataset {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  description String   @default("")
+  dataset     String   @db.LongText // JSON dataset
+  itemCount   Int
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("evaluation_datasets")
+}
+
+model ModelPerformance {
+  id               String   @id @default(cuid())
+  userId           String
+  modelId          String
+  modelName        String
+  avgScore         Float
+  testCount        Int
+  avgExecutionTime Float
+  lastEvaluated    DateTime
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Component scores
+  retrievalScore    Float @default(0)
+  augmentationScore Float @default(0)
+  generationScore   Float @default(0)
+  relevanceScore    Float @default(0)
+  accuracyScore     Float @default(0)
+  completenessScore Float @default(0)
+  coherenceScore    Float @default(0)
+
+  @@unique([userId, modelId])
+  @@index([userId])
+  @@index([modelId])
+  @@map("model_performance")
+}
+
+model EvaluationMetrics {
+  id        String   @id @default(cuid())
+  userId    String
+  date      DateTime
+  metric    String // 'overall', 'retrieval', 'augmentation', 'generation', etc.
+  value     Float
+  testCount Int
+  createdAt DateTime @default(now())
+
+  @@index([userId, date])
+  @@index([metric])
+  @@map("evaluation_metrics")
 }

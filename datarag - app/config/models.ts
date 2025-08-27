@@ -78,4 +78,26 @@ export const AVAILABLE_MODELS = {
   }
 } as const;
 
+const EVAL_MODELS = {
+      base: [
+        { id: "groq/llama-3.1-70b-versatile", name: "Llama 3.1 70B Versatile", provider: "Groq", contextWindow: 32768 },
+        { id: "groq/llama-3.1-8b-instant", name: "Llama 3.1 8B Instant", provider: "Groq", contextWindow: 32768 },
+        { id: "groq/mixtral-8x7b-32768", name: "Mixtral 8x7B", provider: "Groq", contextWindow: 32768 },
+        { id: "groq/llama-guard-3-8b", name: "Llama Guard 3 8B", provider: "Groq", contextWindow: 8192 },
+        { id: "openai/gpt-oss-20b", name: "GPT-OSS 20B", provider: "OpenAI", contextWindow: 131072 },
+        { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B", provider: "OpenAI", contextWindow: 131072 },
+        { id: "gemma2-9b-it", name: "Gemma 2 9B Instruct", provider: "Mistral", contextWindow: 8192 },
+        { id: "gemma-7b-it", name: "Gemma 7B Instruct", provider: "Mistral", contextWindow: 8192 },
+      ],
+      embedding: [
+        { id: "nomic-embed-text", name: "Nomic Embed Text", dimensions: 768, contextLength: 8192, description: "RAG-tuned local embeddings" },
+        { id: "mxbai-embed-large", name: "MxBai Embed Large", dimensions: 1024, contextLength: 512, description: "High-quality semantic search" },
+        { id: "snowflake-arctic-embed", name: "Snowflake Arctic Embed", dimensions: 1024, contextLength: 512, description: "Strong retrieval performance" },
+        { id: "all-minilm", name: "All MiniLM", dimensions: 384, contextLength: 256, description: "Fast & lightweight" },
+      ],
+    } as const;
+
+
+export { EVAL_MODELS as EVALUATION_MODELS };
+
 export type ModelKey = keyof typeof AVAILABLE_MODELS;
