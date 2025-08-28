@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { X, Loader2, Save, CheckCircle2 } from "lucide-react";
 import { useUserSettings, useModels } from "@/hooks/useChat";
-
+import { useTheme } from "next-themes"
 type Props = { open: boolean; onClose: () => void };
 
 export default function SettingsPanel({ open, onClose }: Props) {
@@ -12,6 +12,7 @@ export default function SettingsPanel({ open, onClose }: Props) {
   const [local, setLocal] = useState(settings);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const { setTheme } = useTheme()
 
   useEffect(() => {
     if (open) {
@@ -22,7 +23,10 @@ export default function SettingsPanel({ open, onClose }: Props) {
 
   useEffect(() => {
     setLocal(settings);
-  }, [settings]);
+    if (settings?.theme) {
+      setTheme(settings.theme);
+    }
+  }, [settings, setTheme]);
 
   const modelOptions = useMemo(() => {
     // Be resilient to either strings or objects
@@ -37,6 +41,7 @@ export default function SettingsPanel({ open, onClose }: Props) {
   async function handleSave() {
     setSaving(true);
     const ok = await updateSettings(local);
+    setTheme(local.theme);
     setSaving(false);
     setSaved(!!ok);
     if (ok) {

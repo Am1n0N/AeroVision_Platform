@@ -81,6 +81,8 @@ function CardSection({ title, children }: { title: string; children: React.React
   );
 }
 
+
+
 export interface EvaluationResult {
   id: string;
   model: string;
@@ -146,6 +148,83 @@ interface EvaluationConfig {
 /* ------------------------------------------------------------------
    Constants
 ------------------------------------------------------------------ */
+
+const TONES = {
+  emerald: {
+    bar: "bg-emerald-500",
+    icon: "text-emerald-600 dark:text-emerald-400",
+    iconBg: "bg-emerald-50 dark:bg-emerald-900/20",
+    chipBg: "bg-emerald-50 dark:bg-emerald-900/20",
+    text: "text-emerald-700 dark:text-emerald-300",
+  },
+  amber: {
+    bar: "bg-amber-500",
+    icon: "text-amber-600 dark:text-amber-400",
+    iconBg: "bg-amber-50 dark:bg-amber-900/20",
+    chipBg: "bg-amber-50 dark:bg-amber-900/20",
+    text: "text-amber-700 dark:text-amber-300",
+  },
+  orange: {
+    bar: "bg-orange-500",
+    icon: "text-orange-600 dark:text-orange-400",
+    iconBg: "bg-orange-50 dark:bg-orange-900/20",
+    chipBg: "bg-orange-50 dark:bg-orange-900/20",
+    text: "text-orange-700 dark:text-orange-300",
+  },
+  rose: {
+    bar: "bg-rose-500",
+    icon: "text-rose-600 dark:text-rose-400",
+    iconBg: "bg-rose-50 dark:bg-rose-900/20",
+    chipBg: "bg-rose-50 dark:bg-rose-900/20",
+    text: "text-rose-700 dark:text-rose-300",
+  },
+  sky: {
+    bar: "bg-sky-500",
+    icon: "text-sky-600 dark:text-sky-400",
+    iconBg: "bg-sky-50 dark:bg-sky-900/20",
+    chipBg: "bg-sky-50 dark:bg-sky-900/20",
+    text: "text-sky-700 dark:text-sky-300",
+  },
+  violet: {
+    bar: "bg-violet-500",
+    icon: "text-violet-600 dark:text-violet-400",
+    iconBg: "bg-violet-50 dark:bg-violet-900/20",
+    chipBg: "bg-violet-50 dark:bg-violet-900/20",
+    text: "text-violet-700 dark:text-violet-300",
+  },
+  indigo: {
+    bar: "bg-indigo-500",
+    icon: "text-indigo-600 dark:text-indigo-400",
+    iconBg: "bg-indigo-50 dark:bg-indigo-900/20",
+    chipBg: "bg-indigo-50 dark:bg-indigo-900/20",
+    text: "text-indigo-700 dark:text-indigo-300",
+  },
+  cyan: {
+    bar: "bg-cyan-500",
+    icon: "text-cyan-600 dark:text-cyan-400",
+    iconBg: "bg-cyan-50 dark:bg-cyan-900/20",
+    chipBg: "bg-cyan-50 dark:bg-cyan-900/20",
+    text: "text-cyan-700 dark:text-cyan-300",
+  },
+} as const;
+
+type ToneKey = keyof typeof TONES;
+
+function toneForScore(s: number): ToneKey {
+  if (s >= 0.85) return "emerald";
+  if (s >= 0.70) return "amber";
+  if (s >= 0.50) return "orange";
+  return "rose";
+}
+
+// Stable but simple mapping for labels (category/difficulty → color)
+const TONE_PALETTE: ToneKey[] = ["indigo", "sky", "violet", "cyan", "emerald", "amber", "orange", "rose"];
+function toneFromString(str: string): ToneKey {
+  let sum = 0;
+  for (let i = 0; i < str.length; i++) sum += str.charCodeAt(i);
+  return TONE_PALETTE[sum % TONE_PALETTE.length];
+}
+
 const MOCK_DATASET: EvaluationDataPoint[] = [
   {
     id: "eval_air_001",
@@ -184,18 +263,21 @@ const USE_API = true;
    Small UI atoms (monochrome)
 ------------------------------------------------------------------ */
 function ScoreBar({ label, score }: { label: string; score: number }) {
-  const width = `${Math.max(0, Math.min(1, score)) * 100}%`;
+  const clamped = Math.max(0, Math.min(1, score));
+  const width = `${clamped * 100}%`;
+  const tone = TONES[toneForScore(clamped)];
+
   return (
     <div className="mb-3">
       <div className="flex justify-between items-center mb-1">
         <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">{label}</span>
-        <span className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
-          {(score * 100).toFixed(1)}%
+        <span className={`text-sm font-semibold ${tone.text}`}>
+          {(clamped * 100).toFixed(1)}%
         </span>
       </div>
       <div className="w-full h-2 rounded-full bg-neutral-200 dark:bg-neutral-800">
         <div
-          className="h-2 rounded-full bg-neutral-900 dark:bg-neutral-100 transition-[width]"
+          className={`h-2 rounded-full transition-[width] ${tone.bar}`}
           style={{ width }}
         />
       </div>
@@ -203,17 +285,21 @@ function ScoreBar({ label, score }: { label: string; score: number }) {
   );
 }
 
+
 function MetricCard({
   title,
   value,
   icon: Icon,
   trend,
+  tone = "indigo",
 }: {
   title: string;
   value: string;
   icon: React.ComponentType<{ className?: string }>;
   trend?: string | null;
+  tone?: ToneKey;
 }) {
+  const t = TONES[tone];
   return (
     <div className="rounded-xl border border-neutral-200/70 dark:border-neutral-800/80 bg-white/70 dark:bg-neutral-900/60 backdrop-blur p-6">
       <div className="flex items-center justify-between">
@@ -221,19 +307,20 @@ function MetricCard({
           <p className="text-sm font-medium text-neutral-600 dark:text-neutral-400">{title}</p>
           <p className="text-2xl font-bold text-neutral-900 dark:text-neutral-100 mt-1">{value}</p>
           {trend && (
-            <div className="flex items-center mt-2 text-neutral-600 dark:text-neutral-400">
+            <div className={`flex items-center mt-2 ${t.text}`}>
               <TrendingUp className="w-4 h-4 mr-1" />
               <span className="text-sm">{trend}</span>
             </div>
           )}
         </div>
-        <div className="p-3 rounded-full bg-neutral-100 dark:bg-neutral-800">
-          <Icon className="w-6 h-6 text-neutral-700 dark:text-neutral-300" />
+        <div className={`p-3 rounded-full ${t.iconBg}`}>
+          <Icon className={`w-6 h-6 ${t.icon}`} />
         </div>
       </div>
     </div>
   );
 }
+
 
 /* ------------------------------------------------------------------
    Theme toggle (monochrome)
@@ -457,30 +544,34 @@ function ConfigurationPanel({
         </div>
 
         <div className="space-y-3">
-          {MOCK_DATASET.slice(0, 3).map((item) => (
-            <div
-              key={item.id}
-              className="p-4 rounded-lg border border-neutral-200 dark:border-neutral-800"
-            >
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <span className="px-2 py-1 text-xs font-medium rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300">
-                    {item.category}
-                  </span>
-                  <span className="px-2 py-1 text-xs font-medium rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300">
-                    {item.difficulty}
-                  </span>
+          {MOCK_DATASET.slice(0, 3).map((item) => {
+            const catTone = TONES[toneFromString(item.category)];
+            const diffTone = TONES[toneFromString(item.difficulty)];
+            return (
+              <div
+                key={item.id}
+                className="p-4 rounded-lg border border-neutral-200 dark:border-neutral-800"
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${catTone.chipBg} ${catTone.text}`}>
+                      {item.category}
+                    </span>
+                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${diffTone.chipBg} ${diffTone.text}`}>
+                      {item.difficulty}
+                    </span>
+                  </div>
+                  <span className="text-sm text-neutral-500 dark:text-neutral-400">{item.id}</span>
                 </div>
-                <span className="text-sm text-neutral-500 dark:text-neutral-400">{item.id}</span>
+                <p className="font-medium text-neutral-900 dark:text-neutral-100 mb-2">
+                  {item.question}
+                </p>
+                <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                  {item.groundTruth.slice(0, 150)}…
+                </p>
               </div>
-              <p className="font-medium text-neutral-900 dark:text-neutral-100 mb-2">
-                {item.question}
-              </p>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                {item.groundTruth.slice(0, 150)}…
-              </p>
-            </div>
-          ))}
+            )
+          })}
         </div>
       </div>
 
@@ -850,7 +941,7 @@ export default function EvaluationSystem() {
               Comprehensive testing and evaluation of Retrieval-Augmented Generation systems
             </p>
           </div>
-        
+
         </div>
 
         {/* Tabs */}
@@ -895,22 +986,27 @@ export default function EvaluationSystem() {
                     value={`${(aggregate.avgOverall * 100).toFixed(1)}%`}
                     icon={Award}
                     trend="+5.2% vs last run"
+                    tone="emerald"
                   />
                   <MetricCard
                     title="Retrieval Score"
                     value={`${(aggregate.avgRetrieval * 100).toFixed(1)}%`}
                     icon={Search}
+                    tone="sky"
                   />
                   <MetricCard
                     title="Generation Score"
                     value={`${(aggregate.avgGeneration * 100).toFixed(1)}%`}
                     icon={Brain}
+                    tone="violet"
                   />
                   <MetricCard
                     title="Avg Response Time"
                     value={`${(aggregate.avgExecutionTime / 1000).toFixed(2)}s`}
                     icon={Clock}
+                    tone="cyan"
                   />
+
                 </div>
               </div>
             )}
@@ -987,7 +1083,7 @@ export default function EvaluationSystem() {
                       className="h-2 rounded-full bg-neutral-900 dark:bg-neutral-100 transition-all duration-300"
                       style={{
                         width: `${(results.length /
-                            Math.max(1, selectedBaseModels.length * MOCK_DATASET.length)) *
+                          Math.max(1, selectedBaseModels.length * MOCK_DATASET.length)) *
                           100
                           }%`,
                       }}
@@ -1066,158 +1162,162 @@ export default function EvaluationSystem() {
                   </div>
 
                   <div className="space-y-4">
-                    {results.map((r) => (
-                      <div key={r.id} className="rounded-lg border border-neutral-200 dark:border-neutral-800 overflow-hidden">
-                        <div
-                          className="p-4 cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-800"
-                          onClick={() => setExpanded(expanded === r.id ? null : r.id)}
-                        >
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center space-x-3">
-                              {expanded === r.id ? (
-                                <ChevronDown className="w-4 h-4 text-neutral-500" />
-                              ) : (
-                                <ChevronRight className="w-4 h-4 text-neutral-500" />
-                              )}
-                              <div>
-                                <p className="font-medium text-neutral-900 dark:text-neutral-100">
-                                  {models.base.find((m) => m.id === r.model)?.name ?? r.model} —{" "}
-                                  {r.testCase}
-                                </p>
-                                <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                                  {r.question}
-                                </p>
-                              </div>
-                            </div>
-                            <div className="flex items-center space-x-4">
-                              <div className="text-right">
-                                <p className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
-                                  {(r.scores.overall * 100).toFixed(1)}%
-                                </p>
-                                <p className="text-xs text-neutral-500">
-                                  {(r.executionTime / 1000).toFixed(2)}s
-                                </p>
-                              </div>
-                              <div className="p-2 rounded-full bg-neutral-100 dark:bg-neutral-800">
-                                {/* neutral status icon */}
-                                {r.scores.overall >= 0.8 ? (
-                                  <CheckCircle className="w-5 h-5 text-neutral-700 dark:text-neutral-300" />
-                                ) : r.scores.overall >= 0.6 ? (
-                                  <Clock className="w-5 h-5 text-neutral-700 dark:text-neutral-300" />
+                    {results.map((r) => {
+                      const toneKey =
+                        r.scores.overall >= 0.8 ? "emerald" : r.scores.overall >= 0.6 ? "amber" : "rose";
+                      const t = TONES[toneKey];
+                      return (
+                        <div key={r.id} className="rounded-lg border border-neutral-200 dark:border-neutral-800 overflow-hidden">
+                          <div
+                            className="p-4 cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                            onClick={() => setExpanded(expanded === r.id ? null : r.id)}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-3">
+                                {expanded === r.id ? (
+                                  <ChevronDown className="w-4 h-4 text-neutral-500" />
                                 ) : (
-                                  <XCircle className="w-5 h-5 text-neutral-700 dark:text-neutral-300" />
+                                  <ChevronRight className="w-4 h-4 text-neutral-500" />
                                 )}
+                                <div>
+                                  <p className="font-medium text-neutral-900 dark:text-neutral-100">
+                                    {models.base.find((m) => m.id === r.model)?.name ?? r.model} —{" "}
+                                    {r.testCase}
+                                  </p>
+                                  <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                                    {r.question}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="flex items-center space-x-4">
+                                <div className="text-right">
+                                  <p className="text-lg font-semibold text-neutral-900 dark:text-neutral-100">
+                                    {(r.scores.overall * 100).toFixed(1)}%
+                                  </p>
+                                  <p className="text-xs text-neutral-500">
+                                    {(r.executionTime / 1000).toFixed(2)}s
+                                  </p>
+                                </div>
+                                <div className={`p-2 rounded-full ${t.iconBg}`}>
+                                  {r.scores.overall >= 0.8 ? (
+                                    <CheckCircle className={`w-5 h-5 ${t.icon}`} />
+                                  ) : r.scores.overall >= 0.6 ? (
+                                    <Clock className={`w-5 h-5 ${t.icon}`} />
+                                  ) : (
+                                    <XCircle className={`w-5 h-5 ${t.icon}`} />
+                                  )}
+                                </div>
                               </div>
                             </div>
                           </div>
+
+                          {expanded === r.id && (
+                            <div className="px-4 pb-4 border-t border-neutral-200 dark:border-neutral-800">
+                              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-4">
+                                <div>
+                                  <h4 className="font-medium text-neutral-900 dark:text-neutral-100 mb-4">
+                                    Component Scores
+                                  </h4>
+                                  <div className="space-y-3">
+                                    <ScoreBar label="Retrieval" score={r.scores.retrieval} />
+                                    <ScoreBar label="Augmentation" score={r.scores.augmentation} />
+                                    <ScoreBar label="Generation" score={r.scores.generation} />
+                                    <ScoreBar label="Relevance" score={r.scores.relevance} />
+                                    <ScoreBar label="Accuracy" score={r.scores.accuracy} />
+                                    <ScoreBar label="Completeness" score={r.scores.completeness} />
+                                    <ScoreBar label="Coherence" score={r.scores.coherence} />
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <h4 className="font-medium text-neutral-900 dark:text-neutral-100 mb-4">
+                                    Response Analysis
+                                  </h4>
+                                  <div className="space-y-4">
+                                    <div>
+                                      <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+                                        Generated Answer:
+                                      </p>
+                                      <div className="p-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900">
+                                        <Streamdown className="text-sm text-neutral-800 dark:text-neutral-200">
+                                          {r.generatedAnswer}
+                                        </Streamdown>
+                                      </div>
+                                    </div>
+
+                                    <div>
+                                      <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+                                        Ground Truth:
+                                      </p>
+                                      <div className="p-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900">
+                                        <Streamdown className="text-sm text-neutral-800 dark:text-neutral-200">
+                                          {r.groundTruth}
+                                        </Streamdown>
+                                      </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-4 pt-2">
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-sm text-neutral-600 dark:text-neutral-400">
+                                          Retrieved Docs:
+                                        </span>
+                                        <span className="font-medium text-neutral-900 dark:text-neutral-100">
+                                          {r.retrievedDocs}
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-sm text-neutral-600 dark:text-neutral-400">
+                                          Category:
+                                        </span>
+                                        <span className="px-2 py-1 text-xs rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300">
+                                          {r.category}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Module Metrics */}
+                              <div className="lg:col-span-2 grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+                                <CardSection title="Retrieval Metrics">
+                                  <MetricRow label="Precision@K" value={pct(r.metadata?.retrievalMetrics?.precisionAtK)} />
+                                  <MetricRow label="Recall@K" value={pct(r.metadata?.retrievalMetrics?.recallAtK)} />
+                                  <MetricRow label="MRR" value={num(r.metadata?.retrievalMetrics?.mrr)} />
+                                  <MetricRow label="nDCG@K" value={num(r.metadata?.retrievalMetrics?.ndcgAtK)} />
+                                  <MetricRow label="Mean Chunk Similarity" value={pct(r.metadata?.retrievalMetrics?.meanChunkSimilarity)} />
+                                  <MetricRow label="Token Coverage" value={pct(r.metadata?.retrievalMetrics?.tokenCoverage)} />
+                                  {typeof r.metadata?.retrievalMetrics?.judgeRelevanceAvg === "number" && (
+                                    <MetricRow label="Judge Relevance (avg)" value={pct(r.metadata.retrievalMetrics.judgeRelevanceAvg)} />
+                                  )}
+                                </CardSection>
+
+                                <CardSection title="Augmentation Metrics">
+                                  <MetricRow label="Coverage from Retrieved" value={pct(r.metadata?.augmentationMetrics?.coverageFromRetrieved)} />
+                                  <MetricRow label="Faithfulness to Retrieved" value={pct(r.metadata?.augmentationMetrics?.faithfulnessToRetrieved)} />
+                                  <MetricRow label="Compression Score" value={pct(r.metadata?.augmentationMetrics?.compressionScore)} />
+                                  <MetricRow label="Unique Token Ratio" value={pct(r.metadata?.augmentationMetrics?.uniqueTokenRatio)} />
+                                  <MetricRow label="Length Ratio" value={num(r.metadata?.augmentationMetrics?.lengthRatio, 2)} />
+                                  {typeof r.metadata?.augmentationMetrics?.judgeAugmentation === "number" && (
+                                    <MetricRow label="Judge Augmentation" value={pct(r.metadata.augmentationMetrics.judgeAugmentation)} />
+                                  )}
+                                </CardSection>
+
+                                <CardSection title="Generation Metrics">
+                                  <MetricRow label="ROUGE-L F1" value={pct(r.metadata?.generationMetrics?.rougeL_f1)} />
+                                  <MetricRow label="ROUGE-L Recall" value={pct(r.metadata?.generationMetrics?.rougeL_recall)} />
+                                  <MetricRow label="ROUGE-L Precision" value={pct(r.metadata?.generationMetrics?.rougeL_precision)} />
+                                  <MetricRow label="BLEU-4" value={pct(r.metadata?.generationMetrics?.bleu4)} />
+                                  <MetricRow label="Numeric Exactness" value={pct(r.metadata?.generationMetrics?.numericExactness)} />
+                                  <MetricRow label="Boolean Exactness" value={pct(r.metadata?.generationMetrics?.booleanExactness)} />
+                                  <MetricRow label="Exactness Heuristic" value={pct(r.metadata?.generationMetrics?.exactnessHeuristic)} />
+                                </CardSection>
+                              </div>
+                            </div>
+                          )}
                         </div>
-
-                        {expanded === r.id && (
-                          <div className="px-4 pb-4 border-t border-neutral-200 dark:border-neutral-800">
-                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-4">
-                              <div>
-                                <h4 className="font-medium text-neutral-900 dark:text-neutral-100 mb-4">
-                                  Component Scores
-                                </h4>
-                                <div className="space-y-3">
-                                  <ScoreBar label="Retrieval" score={r.scores.retrieval} />
-                                  <ScoreBar label="Augmentation" score={r.scores.augmentation} />
-                                  <ScoreBar label="Generation" score={r.scores.generation} />
-                                  <ScoreBar label="Relevance" score={r.scores.relevance} />
-                                  <ScoreBar label="Accuracy" score={r.scores.accuracy} />
-                                  <ScoreBar label="Completeness" score={r.scores.completeness} />
-                                  <ScoreBar label="Coherence" score={r.scores.coherence} />
-                                </div>
-                              </div>
-
-                              <div>
-                                <h4 className="font-medium text-neutral-900 dark:text-neutral-100 mb-4">
-                                  Response Analysis
-                                </h4>
-                                <div className="space-y-4">
-                                  <div>
-                                    <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
-                                      Generated Answer:
-                                    </p>
-                                    <div className="p-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900">
-                                      <Streamdown className="text-sm text-neutral-800 dark:text-neutral-200">
-                                        {r.generatedAnswer}
-                                      </Streamdown>
-                                    </div>
-                                  </div>
-
-                                  <div>
-                                    <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
-                                      Ground Truth:
-                                    </p>
-                                    <div className="p-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900">
-                                      <Streamdown className="text-sm text-neutral-800 dark:text-neutral-200">
-                                        {r.groundTruth}
-                                      </Streamdown>
-                                    </div>
-                                  </div>
-
-                                  <div className="grid grid-cols-2 gap-4 pt-2">
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-sm text-neutral-600 dark:text-neutral-400">
-                                        Retrieved Docs:
-                                      </span>
-                                      <span className="font-medium text-neutral-900 dark:text-neutral-100">
-                                        {r.retrievedDocs}
-                                      </span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-sm text-neutral-600 dark:text-neutral-400">
-                                        Category:
-                                      </span>
-                                      <span className="px-2 py-1 text-xs rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300">
-                                        {r.category}
-                                      </span>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Module Metrics */}
-                            <div className="lg:col-span-2 grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
-                              <CardSection title="Retrieval Metrics">
-                                <MetricRow label="Precision@K" value={pct(r.metadata?.retrievalMetrics?.precisionAtK)} />
-                                <MetricRow label="Recall@K" value={pct(r.metadata?.retrievalMetrics?.recallAtK)} />
-                                <MetricRow label="MRR" value={num(r.metadata?.retrievalMetrics?.mrr)} />
-                                <MetricRow label="nDCG@K" value={num(r.metadata?.retrievalMetrics?.ndcgAtK)} />
-                                <MetricRow label="Mean Chunk Similarity" value={pct(r.metadata?.retrievalMetrics?.meanChunkSimilarity)} />
-                                <MetricRow label="Token Coverage" value={pct(r.metadata?.retrievalMetrics?.tokenCoverage)} />
-                                {typeof r.metadata?.retrievalMetrics?.judgeRelevanceAvg === "number" && (
-                                  <MetricRow label="Judge Relevance (avg)" value={pct(r.metadata.retrievalMetrics.judgeRelevanceAvg)} />
-                                )}
-                              </CardSection>
-
-                              <CardSection title="Augmentation Metrics">
-                                <MetricRow label="Coverage from Retrieved" value={pct(r.metadata?.augmentationMetrics?.coverageFromRetrieved)} />
-                                <MetricRow label="Faithfulness to Retrieved" value={pct(r.metadata?.augmentationMetrics?.faithfulnessToRetrieved)} />
-                                <MetricRow label="Compression Score" value={pct(r.metadata?.augmentationMetrics?.compressionScore)} />
-                                <MetricRow label="Unique Token Ratio" value={pct(r.metadata?.augmentationMetrics?.uniqueTokenRatio)} />
-                                <MetricRow label="Length Ratio" value={num(r.metadata?.augmentationMetrics?.lengthRatio, 2)} />
-                                {typeof r.metadata?.augmentationMetrics?.judgeAugmentation === "number" && (
-                                  <MetricRow label="Judge Augmentation" value={pct(r.metadata.augmentationMetrics.judgeAugmentation)} />
-                                )}
-                              </CardSection>
-
-                              <CardSection title="Generation Metrics">
-                                <MetricRow label="ROUGE-L F1" value={pct(r.metadata?.generationMetrics?.rougeL_f1)} />
-                                <MetricRow label="ROUGE-L Recall" value={pct(r.metadata?.generationMetrics?.rougeL_recall)} />
-                                <MetricRow label="ROUGE-L Precision" value={pct(r.metadata?.generationMetrics?.rougeL_precision)} />
-                                <MetricRow label="BLEU-4" value={pct(r.metadata?.generationMetrics?.bleu4)} />
-                                <MetricRow label="Numeric Exactness" value={pct(r.metadata?.generationMetrics?.numericExactness)} />
-                                <MetricRow label="Boolean Exactness" value={pct(r.metadata?.generationMetrics?.booleanExactness)} />
-                                <MetricRow label="Exactness Heuristic" value={pct(r.metadata?.generationMetrics?.exactnessHeuristic)} />
-                              </CardSection>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 </div>
 
@@ -1286,10 +1386,13 @@ export default function EvaluationSystem() {
                         results.reduce((s, r) => s + (r.scores as any)[key], 0) /
                         results.length;
                       const Icon = key === "retrieval" ? Search : key === "augmentation" ? Database : Brain;
+                      const toneKey =
+                        key === "retrieval" ? "sky" : key === "augmentation" ? "indigo" : "violet";
+                      const t = TONES[avg ? toneForScore(avg) : toneKey]; // prioritize score; fallback by key
                       return (
                         <div key={key} className="text-center">
-                          <div className="inline-flex p-4 rounded-full mb-4 bg-neutral-100 dark:bg-neutral-800">
-                            <Icon className="w-8 h-8 text-neutral-700 dark:text-neutral-300" />
+                          <div className={`inline-flex p-4 rounded-full mb-4 ${t.iconBg}`}>
+                            <Icon className={`w-8 h-8 ${t.icon}`} />
                           </div>
                           <h4 className="text-lg font-semibold text-neutral-900 dark:text-neutral-100 capitalize mb-2">
                             {key}
@@ -1298,12 +1401,9 @@ export default function EvaluationSystem() {
                             {(avg * 100).toFixed(1)}%
                           </p>
                           <div className="w-full h-2 rounded-full mb-2 bg-neutral-200 dark:bg-neutral-800">
-                            <div
-                              className="h-2 rounded-full bg-neutral-900 dark:bg-neutral-100"
-                              style={{ width: `${avg * 100}%` }}
-                            />
+                            <div className={`h-2 rounded-full ${t.bar}`} style={{ width: `${avg * 100}%` }} />
                           </div>
-                          <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                          <p className={`text-sm ${t.text}`}>
                             {avg >= 0.8 ? "Excellent" : avg >= 0.6 ? "Good" : "Needs Improvement"}
                           </p>
                         </div>
@@ -1325,15 +1425,15 @@ export default function EvaluationSystem() {
                         const avg =
                           ofCat.reduce((s, r) => s + r.scores.overall, 0) /
                           Math.max(1, ofCat.length);
-
+                        const tone = TONES[toneFromString(cat /* or difficulty */)];
                         return (
                           <div
                             key={cat}
                             className="flex items-center justify-between p-4 rounded-lg border border-neutral-200 dark:border-neutral-800"
                           >
                             <div className="flex items-center space-x-3">
-                              <div className="p-2 rounded-full bg-neutral-100 dark:bg-neutral-800">
-                                <Search className="w-4 h-4 text-neutral-700 dark:text-neutral-300" />
+                              <div className={`p-2 rounded-full ${tone.iconBg}`}>
+                                <Search className={`w-4 h-4 ${tone.icon}`} />
                               </div>
                               <div>
                                 <p className="font-medium text-neutral-900 dark:text-neutral-100">{cat}</p>
@@ -1348,7 +1448,7 @@ export default function EvaluationSystem() {
                               </p>
                               <div className="w-28 h-2 bg-neutral-200 dark:bg-neutral-800 rounded-full">
                                 <div
-                                  className="h-2 bg-neutral-900 dark:bg-neutral-100 rounded-full"
+                                  className={`h-2 rounded-full ${tone.bar}`}
                                   style={{ width: `${Math.max(0, Math.min(1, avg)) * 100}%` }}
                                 />
                               </div>

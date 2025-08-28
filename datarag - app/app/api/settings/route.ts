@@ -8,6 +8,8 @@ export const runtime = "nodejs";
 
 const PatchSchema = z
     .object({
+        id: z.string().optional(),
+        userId: z.string().optional(),
         defaultModel: z.string().min(1).optional(),
         defaultTemperature: z.number().min(0).max(2).optional(),
         useDatabase: z.boolean().optional(),
@@ -20,6 +22,8 @@ const PatchSchema = z
         maxContextLength: z.number().int().min(512).max(32000).optional(),
         rerankingThreshold: z.number().min(0).max(1).optional(),
         enableReranking: z.boolean().optional(),
+        createdAt: z.string().optional(),
+        updatedAt: z.string().optional(),
     })
     .strict();
 

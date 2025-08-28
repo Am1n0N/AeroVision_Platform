@@ -1,12 +1,10 @@
 "use client"
 
 import { UserButton } from "@clerk/nextjs";
-import { Menu, Sparkles } from "lucide-react";
 import { Poppins } from "next/font/google";
 import Link from "next/link";
 
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 import { ModeToggle } from "@/components/mode-toggle";
 import { MobileSidebar } from "@/components/mobile-sidebar";
 
@@ -25,7 +23,7 @@ export const Navbar = () => {
                     <h1 className={cn("hidden md:block text-xl md:text-3xl font-bold text-primary",
                         font.className
                     )}>
-                        AirportIQ
+                        AeroVision
                     </h1>
                 </Link>
             </div>

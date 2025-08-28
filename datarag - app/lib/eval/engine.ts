@@ -2,6 +2,7 @@
 import { ChatGroq } from "@langchain/groq";
 import { HumanMessage } from "@langchain/core/messages";
 import { createChatAgent, AIAgent, MemoryManager } from "@/lib/agent";
+import prismadb from "@/lib/prismadb";
 
 /* ------------------------------------------------------------------ */
 /* Types                                                              */
@@ -9,8 +10,8 @@ import { createChatAgent, AIAgent, MemoryManager } from "@/lib/agent";
 export interface EvaluationDataPoint {
   id: string;
   question: string;
-  context: string;         // Gold/supporting snippet(s) to answer the question
-  groundTruth: string;     // Gold answer
+  context: string;
+  groundTruth: string;
   category: string;
   difficulty: "Easy" | "Medium" | "Hard";
   metadata?: Record<string, any>;
@@ -18,7 +19,7 @@ export interface EvaluationDataPoint {
 
 export interface EvaluationConfig {
   models: string[];
-  embeddingModel: string;  // kept for future embedding-based metrics
+  embeddingModel: string;
   testRetrieval: boolean;
   testAugmentation: boolean;
   testGeneration: boolean;
@@ -28,6 +29,10 @@ export interface EvaluationConfig {
   temperature: number;
   maxTokens: number;
   dataset?: EvaluationDataPoint[];
+  // New configuration options
+  enablePerformanceTracking: boolean;
+  saveDetailedMetrics: boolean;
+  enableAnalytics: boolean;
 }
 
 export interface EvaluationResult {
@@ -43,7 +48,6 @@ export interface EvaluationResult {
     augmentation: number;
     generation: number;
     overall: number;
-    // LLM-judge sub-scores (if enabled)
     relevance: number;
     accuracy: number;
     completeness: number;
@@ -54,10 +58,18 @@ export interface EvaluationResult {
   category: string;
   difficulty: string;
   metadata: Record<string, any>;
+  // New fields for better tracking
+  sessionId?: string;
+  contextSources?: Array<{
+    type: string;
+    title: string;
+    relevanceScore: number;
+    snippet: string;
+  }>;
 }
 
 /* ------------------------------------------------------------------ */
-/* LLM judge prompts (unchanged)                                      */
+/* LLM judge prompts                                                  */
 /* ------------------------------------------------------------------ */
 const JUDGE_PROMPTS: Record<string, string> = {
   relevance: `You are an expert evaluator. Rate how relevant the generated answer is to the given question on a scale of 0.0 to 1.0.
@@ -112,6 +124,8 @@ Consider:
 
 Respond with only a number between 0.0 and 1.0:`,
 };
+
+
 
 /* ------------------------------------------------------------------ */
 /* Helpers: tokenization & classic metrics                             */
@@ -249,8 +263,13 @@ function boolish(s: string): "yes" | "no" | null {
 export class EvaluationEngine {
   private judgeModel: ChatGroq | null = null;
   private memoryManager: MemoryManager | null = null;
+  private userId: string;
+  private sessionId: string;
 
-  constructor(private config: EvaluationConfig) {
+  constructor(private config: EvaluationConfig, userId: string) {
+    this.userId = userId;
+    this.sessionId = `eval-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
     if (config.useJudgeLLM) {
       this.judgeModel = new ChatGroq({
         apiKey: process.env.GROQ_API_KEY,
@@ -264,6 +283,180 @@ export class EvaluationEngine {
   async initializeMemory(): Promise<void> {
     if (!this.memoryManager) {
       this.memoryManager = await MemoryManager.getInstance();
+    }
+  }
+
+
+  /**
+   * Create or update model performance tracking
+   */
+  private async updateModelPerformance(model: string, results: EvaluationResult[]): Promise<void> {
+    if (!this.config.enablePerformanceTracking) return;
+
+    const modelResults = results.filter(r => r.model === model);
+    if (modelResults.length === 0) return;
+
+    const avgScore = modelResults.reduce((s, r) => s + r.scores.overall, 0) / modelResults.length;
+    const avgExecutionTime = modelResults.reduce((s, r) => s + r.executionTime, 0) / modelResults.length;
+
+    const componentScores = {
+      retrievalScore: modelResults.reduce((s, r) => s + r.scores.retrieval, 0) / modelResults.length,
+      augmentationScore: modelResults.reduce((s, r) => s + r.scores.augmentation, 0) / modelResults.length,
+      generationScore: modelResults.reduce((s, r) => s + r.scores.generation, 0) / modelResults.length,
+      relevanceScore: modelResults.reduce((s, r) => s + r.scores.relevance, 0) / modelResults.length,
+      accuracyScore: modelResults.reduce((s, r) => s + r.scores.accuracy, 0) / modelResults.length,
+      completenessScore: modelResults.reduce((s, r) => s + r.scores.completeness, 0) / modelResults.length,
+      coherenceScore: modelResults.reduce((s, r) => s + r.scores.coherence, 0) / modelResults.length,
+    };
+
+    try {
+      await prismadb.modelPerformance.upsert({
+        where: {
+          userId_modelId: {
+            userId: this.userId,
+            modelId: model,
+          },
+        },
+        update: {
+          modelName: model,
+          avgScore,
+          testCount: modelResults.length,
+          avgExecutionTime,
+          lastEvaluated: new Date(),
+          ...componentScores,
+        },
+        create: {
+          userId: this.userId,
+          modelId: model,
+          modelName: model,
+          avgScore,
+          testCount: modelResults.length,
+          avgExecutionTime,
+          lastEvaluated: new Date(),
+          ...componentScores,
+        },
+      });
+    } catch (error) {
+      console.warn("Failed to update model performance:", error);
+    }
+  }
+
+  /**
+   * Save detailed evaluation metrics
+   */
+  private async saveDetailedMetrics(results: EvaluationResult[]): Promise<void> {
+    if (!this.config.saveDetailedMetrics) return;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const metrics = [
+      { metric: 'overall', value: results.reduce((s, r) => s + r.scores.overall, 0) / results.length },
+      { metric: 'retrieval', value: results.reduce((s, r) => s + r.scores.retrieval, 0) / results.length },
+      { metric: 'augmentation', value: results.reduce((s, r) => s + r.scores.augmentation, 0) / results.length },
+      { metric: 'generation', value: results.reduce((s, r) => s + r.scores.generation, 0) / results.length },
+      { metric: 'relevance', value: results.reduce((s, r) => s + r.scores.relevance, 0) / results.length },
+      { metric: 'accuracy', value: results.reduce((s, r) => s + r.scores.accuracy, 0) / results.length },
+      { metric: 'completeness', value: results.reduce((s, r) => s + r.scores.completeness, 0) / results.length },
+      { metric: 'coherence', value: results.reduce((s, r) => s + r.scores.coherence, 0) / results.length },
+    ];
+
+    try {
+      await Promise.all(
+        metrics.map(({ metric, value }) =>
+          prismadb.evaluationMetrics.create({
+            data: {
+              userId: this.userId,
+              date: today,
+              metric,
+              value: isFinite(value) ? value : 0,
+              testCount: results.length,
+            },
+          })
+        )
+      );
+    } catch (error) {
+      console.warn("Failed to save detailed metrics:", error);
+    }
+  }
+
+  /**
+ * Log analytics events
+ */
+  private async logAnalyticsEvent(eventType: string, metadata?: Record<string, any>): Promise<void> {
+    if (!this.config.enableAnalytics) return;
+
+    try {
+      await prismadb.analyticsEvent.create({
+        data: {
+          userId: this.userId,
+          eventType,
+          sessionId: this.sessionId,
+          metadata: metadata ? JSON.stringify(metadata) : null,
+        },
+      });
+    } catch (error) {
+      console.warn("Failed to log analytics event:", error);
+    }
+  }
+
+  /**
+   * Save query history for evaluation queries
+   */
+  private async saveQueryHistory(
+    query: string,
+    success: boolean,
+    executionTime: number,
+    resultCount?: number,
+    errorMessage?: string
+  ): Promise<void> {
+    try {
+      await prismadb.queryHistory.create({
+        data: {
+          userId: this.userId,
+          sessionId: this.sessionId,
+          query,
+          success,
+          executionTime,
+          resultCount: resultCount || 0,
+          errorMessage,
+          context: "evaluation",
+        },
+      });
+    } catch (error) {
+      console.warn("Failed to save query history:", error);
+    }
+  }
+
+  /**
+ * Enhanced evaluation with database context
+ */
+  private async getRelevantKnowledgeBaseEntries(question: string, limit = 3): Promise<Array<{
+    title: string;
+    content: string;
+    category: string | null;
+  }>> {
+    try {
+      // Use full-text search on knowledge base
+      const entries = await prismadb.knowledgeBaseEntry.findMany({
+        where: {
+          OR: [
+            { isPublic: true },
+            { userId: this.userId },
+          ],
+        },
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      });
+
+      return entries.map(entry => ({
+        title: entry.title,
+        content: entry.content,
+        category: entry.category,
+      }));
+    } catch (error) {
+      console.warn("Failed to fetch knowledge base entries:", error);
+      return [];
     }
   }
 
@@ -507,31 +700,111 @@ export class EvaluationEngine {
   }
 
   /* ----------------------------- Orchestration ----------------------------- */
-  async evaluateTestCase(agent: AIAgent, test: EvaluationDataPoint, model: string): Promise<EvaluationResult> {
+  async evaluateTestCase(
+    agent: AIAgent,
+    test: EvaluationDataPoint,
+    model: string
+  ): Promise<EvaluationResult> {
     const start = Date.now();
 
+    // Log start of test case
+    await this.logAnalyticsEvent('evaluation_test_start', {
+      testId: test.id,
+      model,
+      category: test.category,
+      difficulty: test.difficulty,
+    });
+
     try {
+      // Get relevant knowledge base context
+      const kbEntries = await this.getRelevantKnowledgeBaseEntries(test.question);
+
       const response = await agent.generateChatResponse(test.question, {
-        userId: "evaluation-system",
-        sessionId: `eval-${test.id}-${Date.now()}`,
+        userId: this.userId,
+        sessionId: this.sessionId,
       });
 
-      // Retrieved/augmented extraction (be defensive)
+      // Enhanced context extraction
       const retrievedContexts: string[] = [];
+      const contextSources: Array<{
+        type: string;
+        title: string;
+        relevanceScore: number;
+        snippet: string;
+      }> = [];
+
       const ctxs = (response as any)?.contexts ?? {};
-      if (typeof ctxs.knowledge === "string") retrievedContexts.push(ctxs.knowledge);
-      if (typeof ctxs.similar === "string") retrievedContexts.push(ctxs.similar);
-      if (Array.isArray(ctxs.chunks)) retrievedContexts.push(...ctxs.chunks.map((c: any) => String(c)));
+
+      // Extract various context sources
+      if (typeof ctxs.knowledge === "string") {
+        retrievedContexts.push(ctxs.knowledge);
+        contextSources.push({
+          type: "knowledge_base",
+          title: "Knowledge Base",
+          relevanceScore: 0.8,
+          snippet: ctxs.knowledge.slice(0, 200),
+        });
+      }
+
+      if (typeof ctxs.similar === "string") {
+        retrievedContexts.push(ctxs.similar);
+        contextSources.push({
+          type: "similar_documents",
+          title: "Similar Documents",
+          relevanceScore: 0.7,
+          snippet: ctxs.similar.slice(0, 200),
+        });
+      }
+
+      if (Array.isArray(ctxs.chunks)) {
+        const chunks = ctxs.chunks.map((c: any) => String(c));
+        retrievedContexts.push(...chunks);
+        chunks.forEach((chunk, idx) => {
+          contextSources.push({
+            type: "document_chunk",
+            title: `Document Chunk ${idx + 1}`,
+            relevanceScore: 0.6,
+            snippet: chunk.slice(0, 200),
+          });
+        });
+      }
+
+      // Add knowledge base entries to context
+      kbEntries.forEach(entry => {
+        retrievedContexts.push(entry.content);
+        contextSources.push({
+          type: "knowledge_base_entry",
+          title: entry.title,
+          relevanceScore: 0.5,
+          snippet: entry.content.slice(0, 200),
+        });
+      });
 
       const augmentedContext: string = (ctxs.knowledge as string) || retrievedContexts.join("\n---\n") || "";
 
-      // Module scores
+      // Evaluate components
       const ret = await this.evaluateRetrieval(test, retrievedContexts);
       const aug = await this.evaluateAugmentation(retrievedContexts, augmentedContext, test.question);
       const gen = await this.evaluateGeneration(test.question, (response as any)?.content ?? "", test.groundTruth);
 
       const overall = (ret.score + aug.score + gen.score) / 3;
       const executionTime = Date.now() - start;
+
+      // Save query history
+      await this.saveQueryHistory(
+        test.question,
+        true,
+        executionTime,
+        retrievedContexts.length
+      );
+
+      // Log successful completion
+      await this.logAnalyticsEvent('evaluation_test_complete', {
+        testId: test.id,
+        model,
+        overallScore: overall,
+        executionTime,
+      });
 
       return {
         id: `${model}-${test.id}`,
@@ -541,6 +814,8 @@ export class EvaluationEngine {
         groundTruth: test.groundTruth,
         generatedAnswer: (response as any)?.content ?? "",
         retrievedContexts,
+        contextSources,
+        sessionId: this.sessionId,
         scores: {
           retrieval: ret.score,
           augmentation: aug.score,
@@ -552,21 +827,39 @@ export class EvaluationEngine {
           coherence: gen.sub.coherence,
         },
         executionTime,
-        retrievedDocs: Array.isArray((response as any)?.sources) ? (response as any).sources.length : retrievedContexts.length,
+        retrievedDocs: contextSources.length,
         category: test.category,
         difficulty: test.difficulty,
         metadata: {
           modelUsed: (response as any)?.model,
-          // Detailed module metrics to help debugging/dashboards
           retrievalMetrics: ret.details,
           augmentationMetrics: aug.details,
           generationMetrics: gen.details,
-          contextSources: (response as any)?.metadata?.contextSources,
+          contextSources: contextSources,
           rerankingApplied: (response as any)?.metadata?.rerankingApplied,
           totalContextTokens: (response as any)?.metadata?.totalContextTokens,
+          knowledgeBaseEntriesUsed: kbEntries.length,
         },
       };
     } catch (err: any) {
+      const executionTime = Date.now() - start;
+
+      // Save failed query
+      await this.saveQueryHistory(
+        test.question,
+        false,
+        executionTime,
+        0,
+        err?.message
+      );
+
+      // Log error
+      await this.logAnalyticsEvent('evaluation_test_error', {
+        testId: test.id,
+        model,
+        error: err?.message,
+      });
+
       return {
         id: `${model}-${test.id}`,
         model,
@@ -575,6 +868,8 @@ export class EvaluationEngine {
         groundTruth: test.groundTruth,
         generatedAnswer: `Error: ${err?.message ?? "unknown"}`,
         retrievedContexts: [],
+        contextSources: [],
+        sessionId: this.sessionId,
         scores: {
           retrieval: 0,
           augmentation: 0,
@@ -585,7 +880,7 @@ export class EvaluationEngine {
           completeness: 0,
           coherence: 0,
         },
-        executionTime: Date.now() - start,
+        executionTime,
         retrievedDocs: 0,
         category: test.category,
         difficulty: test.difficulty,
@@ -596,26 +891,58 @@ export class EvaluationEngine {
 
   async runEvaluation(dataset: EvaluationDataPoint[]): Promise<EvaluationResult[]> {
     await this.initializeMemory();
+
+    // Log evaluation start
+    await this.logAnalyticsEvent('evaluation_run_start', {
+      modelCount: this.config.models.length,
+      testCount: dataset.length,
+      totalTests: this.config.models.length * dataset.length,
+    });
+
     const results: EvaluationResult[] = [];
 
-    for (const model of this.config.models) {
-      const agent = createChatAgent({
-        modelKey: model as any,
-        temperature: this.config.temperature,
-        maxTokens: this.config.maxTokens,
-        useMemory: true,
-        useKnowledgeBase: true,
-        useDatabase: true,
-        useReranking: true,
+    try {
+      for (const model of this.config.models) {
+        const agent = createChatAgent({
+          modelKey: model as any,
+          temperature: this.config.temperature,
+          maxTokens: this.config.maxTokens,
+          useMemory: true,
+          useKnowledgeBase: true,
+          useDatabase: true,
+          useReranking: true,
+        });
+
+        const modelResults: EvaluationResult[] = [];
+
+        for (const test of dataset) {
+          const result = await this.evaluateTestCase(agent, test, model);
+          results.push(result);
+          modelResults.push(result);
+        }
+
+        // Update model performance after each model
+        await this.updateModelPerformance(model, modelResults);
+      }
+
+      // Save detailed metrics
+      await this.saveDetailedMetrics(results);
+
+      // Log successful completion
+      await this.logAnalyticsEvent('evaluation_run_complete', {
+        totalResults: results.length,
+        avgOverallScore: results.reduce((s, r) => s + r.scores.overall, 0) / results.length,
       });
 
-      for (const test of dataset) {
-        const r = await this.evaluateTestCase(agent, test, model);
-        results.push(r);
-      }
+      return results;
+    } catch (error: any) {
+      // Log evaluation error
+      await this.logAnalyticsEvent('evaluation_run_error', {
+        error: error?.message,
+        resultsCompleted: results.length,
+      });
+      throw error;
     }
-
-    return results;
   }
 }
 
@@ -653,5 +980,5 @@ export const DEFAULT_EVALUATION_DATASET: EvaluationDataPoint[] = [
     category: "Baggage",
     difficulty: "Medium",
   }
-  
+
 ];
