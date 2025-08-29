@@ -1,11 +1,3 @@
-// lib/database-tools.ts
-// Robust MySQL-only LangChain-style SQL tools with tolerant schemas,
-// alias normalization, auto-generation, validation & auto-repair.
-//
-// Dependencies: mysql2, zod, @langchain/core
-
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import mysql, {
   Pool,
   PoolConnection,
@@ -67,7 +59,6 @@ const logPanel = (opts: { title: string; content: string; level?: "info" | "erro
   if (process.env.SQL_TOOL_DEBUG === "true") {
     const timestamp = new Date().toISOString();
     const level = opts.level || "info";
-    console.log(`[${timestamp}] [${level.toUpperCase()}] === ${opts.title} ===\n${opts.content}\n`);
   }
 };
 

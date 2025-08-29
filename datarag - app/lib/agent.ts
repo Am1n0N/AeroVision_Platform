@@ -1,18 +1,22 @@
+import { config } from './../middleware';
 
 import { ChatGroq } from "@langchain/groq";
+import { InferenceClient } from "@huggingface/inference";
+
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { Document } from "@langchain/core/documents";
 import { currentUser } from "@clerk/nextjs";
 import { NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
 import { Redis } from "@upstash/redis";
-import { OllamaEmbeddings } from "@langchain/community/embeddings/ollama";
 import { Pinecone } from "@pinecone-database/pinecone";
 import { PineconeStore } from "@langchain/pinecone";
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { RecursiveCharacterTextSplitter } from "@pinecone-database/doc-splitter";
 import prismadb from "@/lib/prismadb";
 import { rateLimit } from "@/lib/rate-limit";
+
+import { EMBEDDING_MODELS } from "@/config/models";
 
 // DB tools (must return JSON-able results if used as Tools)
 import {
@@ -28,19 +32,10 @@ import {
 import { AVAILABLE_MODELS, type ModelKey } from "@/config/models";
 import { isDatabaseQuery } from "@/lib/database-detection";
 
-/* -----------------------------------------------------------------------------
- * Embedding config (kept local via Ollama)
- * -------------------------------------------------------------------------- */
-export const EMBEDDING_MODELS = {
-  "nomic-embed-text": { dimensions: 768, contextLength: 8192, description: "RAG-tuned local embeddings", chunkSize: 512 },
-  "mxbai-embed-large": { dimensions: 1024, contextLength: 512, description: "High-quality semantic search", chunkSize: 256 },
-  "snowflake-arctic-embed": { dimensions: 1024, contextLength: 512, description: "Strong retrieval performance", chunkSize: 384 },
-  "all-minilm": { dimensions: 384, contextLength: 256, description: "Fast & lightweight", chunkSize: 128 },
-} as const;
+
 
 interface EmbeddingConfig {
   model: string;
-  baseUrl?: string;
   chunkSize: number;
   chunkOverlap: number;
   batchSize: number;
@@ -50,8 +45,7 @@ interface EmbeddingConfig {
 }
 
 export const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
-  model: "nomic-embed-text",
-  baseUrl: "http://localhost:11434",
+  model: "intfloat/e5-base-v2",
   chunkSize: 512,
   chunkOverlap: 128,
   batchSize: 10,
@@ -296,30 +290,126 @@ function truncateStringByBytes(str: string, maxBytes: number): string {
 }
 
 // These health/model-pull helpers remain for LOCAL embeddings via Ollama
-export async function checkOllamaHealth(baseUrl = "http://localhost:11434"): Promise<boolean> {
+export async function checkHuggingFaceHealth(model = "sentence-transformers/BAAI/bge-base-en-v1.5"): Promise<boolean> {
   try {
-    const res = await fetch(`${baseUrl}/api/tags`);
-    return res.ok;
-  } catch {
+    const hf = new HuggingFaceEmbeddings({ model });
+    const testEmbedding = await hf.embedQuery("test");
+    return Array.isArray(testEmbedding) && testEmbedding.length > 0;
+  } catch (error) {
+    console.warn("HuggingFace health check failed:", error);
     return false;
   }
 }
 
-export async function pullOllamaModels(models: string[] = ["nomic-embed-text"], baseUrl = "http://localhost:11434") {
-  await Promise.all(
-    models.map(async (m) => {
+
+
+class HuggingFaceEmbeddings {
+  private client: InferenceClient;
+  private model: string;
+  private normalize: boolean;
+  private maxRetries: number;
+  private waitForModel: boolean;
+
+  constructor(options: { model?: string; token?: string; normalize?: boolean; maxRetries?: number; waitForModel?: boolean } = {}) {
+    const token =
+      options.token ||
+      process.env.HUGGING_FACE_ACCESS_TOKEN ||
+      process.env.HUGGINGFACE_API_KEY ||
+      process.env.HUGGINGFACEHUB_API_KEY ||
+      process.env.HUGGINGFACEHUB_API_TOKEN ||
+      process.env.HF_ACCESS_TOKEN;
+
+    this.client = new InferenceClient(token || undefined);
+    this.model = options.model || "sentence-transformers/BAAI/bge-base-en-v1.5";
+    this.normalize = options.normalize ?? true;
+    this.maxRetries = Math.max(0, options.maxRetries ?? 3);
+    this.waitForModel = options.waitForModel ?? true;
+  }
+
+  async embedQuery(text: string): Promise<number[]> {
+    const [v] = await this._embed([this.prefixForModel(text, true)]);
+    return v;
+  }
+
+  async embedDocuments(texts: string[]): Promise<number[][]> {
+    return this._embed(texts.map(t => this.prefixForModel(t, false)));
+  }
+
+  // ---- internals ---------------------------------------------------
+  private async _embed(texts: string[]): Promise<number[][]> {
+    if (!texts.length) return [];
+    let attempt = 0;
+
+    while (true) {
       try {
-        await fetch(`${baseUrl}/api/pull`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: m }),
-        });
-      } catch (e) {
-        console.error(`Failed to pull model ${m}:`, e);
+        const inputs = texts.length === 1 ? texts[0] : texts;
+        const out = await this.client.featureExtraction(
+          { model: this.model, inputs },
+          { wait_for_model: this.waitForModel }
+        );
+        const vectors = this.to2D(out as any, texts.length);
+        return this.normalize ? vectors.map(this.l2norm) : vectors;
+      } catch (e: any) {
+        const status = e?.status ?? e?.cause?.status;
+        if ((status === 429 || status === 503) && attempt < this.maxRetries) {
+          await new Promise(r => setTimeout(r, 500 * (attempt + 1) ** 2));
+          attempt++;
+          continue;
+        }
+        if (status === 404) throw new Error(`Model not found or access denied: ${this.model}`);
+        throw new Error(`Embedding failed: ${e?.message || String(e)}`);
       }
-    })
-  );
+    }
+  }
+
+  /** Coerce output into [batch][dim], mean-pooling when token vectors are returned. */
+  private to2D(output: any, count: number): number[][] {
+    if (!Array.isArray(output)) throw new Error("Unexpected embedding response format.");
+
+    // [dim]
+    if (typeof output[0] === "number") return [output as number[]];
+
+    // [N][dim] or [tokens][dim]
+    if (Array.isArray(output[0]) && typeof output[0][0] === "number") {
+      if (count === 1 && output.length > 1) return [this.meanPool(output as number[][])];
+      return output as number[][];
+    }
+
+    // [N][tokens][dim]
+    if (Array.isArray(output[0]) && Array.isArray(output[0][0]) && typeof output[0][0][0] === "number") {
+      return (output as number[][][]).map(m => this.meanPool(m));
+    }
+
+    throw new Error("Unexpected embedding response shape.");
+  }
+
+  private meanPool(mat: number[][]): number[] {
+    const rows = mat.length;
+    const cols = rows ? mat[0].length : 0;
+    const sum = new Array(cols).fill(0);
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) sum[c] += mat[r][c] || 0;
+    for (let c = 0; c < cols; c++) sum[c] /= rows || 1;
+    return sum;
+  }
+
+  private l2norm = (v: number[]): number[] => {
+    let s = 0;
+    for (let i = 0; i < v.length; i++) s += v[i] * v[i];
+    s = Math.sqrt(s) || 1;
+    return v.map(x => x / s);
+  };
+
+  /** Add recommended prefixes for certain families (E5 / GTE). */
+  private prefixForModel(text: string, isQuery: boolean): string {
+    const id = this.model.toLowerCase();
+    if (id.includes("e5") || id.includes("gte")) {
+      return `${isQuery ? "query:" : "passage:"} ${text}`;
+    }
+    return text;
+  }
 }
+
+
 
 /* -----------------------------------------------------------------------------
  * Memory Manager (consolidated)
@@ -328,7 +418,7 @@ class MemoryManager {
   private static instance: MemoryManager;
   private redis: Redis;
   private pinecone: Pinecone;
-  private embeddings: OllamaEmbeddings;
+  private embeddings: HuggingFaceEmbeddings;
   private cfg: EmbeddingConfig;
 
   private static readonly NS_KB = "knowledge_base";
@@ -338,7 +428,9 @@ class MemoryManager {
     this.redis = Redis.fromEnv();
     this.pinecone = new Pinecone({ apiKey: process.env.PINECONE_API_KEY! });
     this.cfg = { ...DEFAULT_EMBEDDING_CONFIG, ...override };
-    this.embeddings = new OllamaEmbeddings({ model: this.cfg.model, baseUrl: this.cfg.baseUrl });
+    this.embeddings = new HuggingFaceEmbeddings({
+      model: this.cfg.model
+    });
   }
 
   static async getInstance(override?: Partial<EmbeddingConfig>) {
@@ -398,15 +490,93 @@ class MemoryManager {
       const v = await this.embeddings.embedQuery("ping");
       return Array.isArray(v) && v.length > 0;
     } catch (e) {
-      console.warn("Ollama embeddings health check failed:", e);
+      console.warn("embeddings health check failed:", e);
       return false;
     }
   }
+
+  private async getPineconeIndexDimension(): Promise<number | null> {
+    const name = process.env.PINECONE_INDEX;
+    if (!name) throw new Error("PINECONE_INDEX is not set");
+
+    try {
+      // Works with @pinecone-database/pinecone v2 client
+      // If your version differs, we also read from env as a fallback.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const meta: any = await (this.pinecone as any).describeIndex({ indexName: name });
+      const dim =
+        meta?.dimension ??
+        meta?.status?.dimension ??
+        meta?.spec?.pod?.spec?.dimension ??
+        meta?.spec?.serverless?.spec?.dimension;
+      if (typeof dim === "number") return dim;
+    } catch (_) {
+      /* ignore, fallback below */
+    }
+
+    // Optional explicit env override
+    if (process.env.PINECONE_DIMENSION && !Number.isNaN(Number(process.env.PINECONE_DIMENSION))) {
+      return Number(process.env.PINECONE_DIMENSION);
+    }
+
+    return null; // unknown (we’ll still validate via a probe)
+  }
+
+  private async getModelDimension(modelId: string): Promise<number> {
+    // 1) from known table
+    const known = (EMBEDDING_MODELS as Record<string, { dimensions: number }>)[modelId];
+    if (known?.dimensions) return known.dimensions;
+
+    // 2) dynamic probe (single embed) – robust if model is custom
+    try {
+      const hf = new HuggingFaceEmbeddings({ model: modelId });
+      const vec = await hf.embedQuery("dimension probe");
+      if (Array.isArray(vec)) return vec.length;
+    } catch (_) {
+      // fall through
+    }
+
+    // 3) final fallback (your index is 768, so default to 768 to be safe)
+    return 768;
+  }
+
   async ensureEmbeddingModelsAvailable() {
     try {
-      await pullOllamaModels([this.cfg.model], this.cfg.baseUrl);
+      const modelId = this.cfg.model;
+
+      // If it's an HF model (contains "/"), no local pull is needed
+      if (modelId.includes("/")) {
+        const [indexDim, modelDim] = await Promise.all([
+          this.getPineconeIndexDimension(),
+          this.getModelDimension(modelId),
+        ]);
+
+        if (indexDim && indexDim !== modelDim) {
+          throw new Error(
+            `Embedding dimension mismatch: Pinecone index is ${indexDim} but model "${modelId}" outputs ${modelDim}. ` +
+            `Pick a ${indexDim}-dim model (e.g., intfloat/e5-base-v2, Alibaba-NLP/gte-base-en-v1.5, BAAI/bge-base-en-v1.5) ` +
+            `or recreate the index with dimension ${modelDim}.`
+          );
+        }
+
+        return true;
+      }
+
+      const [indexDim, modelDim] = await Promise.all([
+        this.getPineconeIndexDimension(),
+        this.getModelDimension(modelId),
+      ]);
+
+      if (indexDim && indexDim !== modelDim) {
+        throw new Error(
+          `Embedding dimension mismatch: Pinecone index is ${indexDim} but local model "${modelId}" outputs ${modelDim}. ` +
+          `Use a ${indexDim}-dim embedding model or recreate the index.`
+        );
+      }
+
       return true;
-    } catch {
+    } catch (e) {
+      console.error("ensureEmbeddingModelsAvailable failed:", e);
       return false;
     }
   }
@@ -461,11 +631,9 @@ class MemoryManager {
     const ids: string[] = [];
     for (let i = 0; i < docs.length; i += this.cfg.batchSize) {
       const batch = docs.slice(i, i + this.cfg.batchSize);
-      const res = await store.addDocuments(
-        batch,
-        { ids: batch.map((_, j) => `${documentId}_chunk_${i + j}`) }
-      );
-      ids.push(...res);
+      const idList = batch.map((_, j) => `${documentId}_chunk_${i + j}`);
+      await store.addDocuments(batch, { ids: idList });  // addDocuments returns void
+      ids.push(...idList);
       if (i > 0) await new Promise((r) => setTimeout(r, 250));
     }
     return ids;
@@ -922,7 +1090,8 @@ export class AIAgent {
 
   constructor(cfg: Partial<AgentConfig> = {}) {
     this.cfg = { ...DEFAULT_CONFIG, ...cfg };
-    this.debugMode = process.env.NODE_ENV === "development" || process.env.AGENT_DEBUG === "true";
+    this.debugMode = process.env.AGENT_DEBUG === "true";
+    console.log("DebugMode: ",this.debugMode)
     initTools(this.cfg.modelKey);
     this.logger = (level: string, message: string, data?: any) => {
       if (!this.debugMode && level === 'debug') return;
@@ -2267,10 +2436,10 @@ export async function initializeAgent(config: {
   const agent = createChatAgent(agentConfig);
   const embeddingIntegration = new ModernEmbeddingIntegration(embeddingConfig);
 
-  const healthStatus = { ollama: false, embedding: false, models: false };
+  const healthStatus = { HuggingFace: false, embedding: false, models: false };
 
   if (healthCheck) {
-    healthStatus.ollama = await checkOllamaHealth(embeddingConfig.baseUrl || DEFAULT_EMBEDDING_CONFIG.baseUrl);
+    healthStatus.HuggingFace = await checkHuggingFaceHealth(embeddingConfig.model);
     healthStatus.embedding = await embeddingIntegration.healthCheck();
     if (ensureModels) healthStatus.models = await embeddingIntegration.ensureModelsAvailable();
   }

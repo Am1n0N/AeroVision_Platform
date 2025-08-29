@@ -31,41 +31,30 @@ function tryParse<T = any>(s: any): { ok: true; data: T } | { ok: false; error: 
   }
 }
 
-// POST handler for database queries
-// POST handler for database queries
+
 export async function POST(request: Request) {
   try {
-    console.log("[POST] Incoming request...");
-
     // Authentication and rate limiting
     const authResult = await handleAuthAndRateLimit(request);
-    console.log("[Auth Result]", authResult);
-
     if (!authResult.success) {
-      console.warn("[Auth Failed]", authResult.error);
       return authResult.error;
     }
     const { user } = authResult;
-    console.log("[User]", user);
+
+    if (!user) {
+      return NextResponse.json(
+        { error: "User authentication failed" },
+        { status: 401 }
+      );
+    }
 
     // Parse and validate request
     const body = await request.json();
-    console.log("[Request Body]", body);
 
     const { question, directQuery, model, returnRawData, errors } =
       validateDatabaseRequest(body);
-    console.log("[Validated Request]", {
-      question,
-      directQuery,
-      model,
-      returnRawData,
-      errors,
-    });
-
     if (errors.length > 0) {
-      console.warn("[Validation Errors]", errors);
       return NextResponse.json(
-        { error: "Invalid request format", details: errors },
         { status: 400 }
       );
     }
@@ -82,17 +71,14 @@ export async function POST(request: Request) {
     };
 
     const agent = createDatabaseAgent(agentConfig);
-    console.log("[Agent Config]", agentConfig);
 
     let result;
     let sqlQuery = "";
     let answer = "";
 
     if (directQuery) {
-      console.log("[Direct Query Execution]", directQuery);
 
       if (!directQuery.trim().toUpperCase().startsWith("SELECT")) {
-        console.warn("[Rejected Direct Query - not SELECT]");
         return NextResponse.json(
           { error: "Only SELECT queries are allowed for direct execution" },
           { status: 400 }
@@ -101,34 +87,25 @@ export async function POST(request: Request) {
 
       try {
         result = await agent.executeQuery(directQuery);
-        console.log("[Direct Query Result]", result);
         sqlQuery = directQuery;
       } catch (error: any) {
-        console.error("[Direct Query Error]", error);
         return NextResponse.json(
           { error: "Direct query execution failed", details: error.message },
           { status: 400 }
         );
       }
     } else {
-      console.log("[Natural Language Question Execution]", question);
-
       try {
         result = await agent.executeQuery(question);
-        console.log("[Agent Query Result]", result);
         sqlQuery = result.sqlQuery || "";
         answer = result.summary || "";
       } catch (error: any) {
-        console.error("[Agent Query Error]", error);
         return NextResponse.json(
           { error: "Query generation and execution failed", details: error.message },
           { status: 400 }
         );
       }
     }
-
-    // Build response
-    console.log("[Result Before Response]", result);
 
     const response: any = {
       success: !!result?.success,
@@ -163,9 +140,6 @@ export async function POST(request: Request) {
     if (result?.performance) {
       response.performance = result.performance;
     }
-
-    console.log("[Final Response]", response);
-
     return NextResponse.json(response);
   } catch (error: any) {
     console.error("[DATABASE_QUERY_ERROR]", error);

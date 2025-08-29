@@ -611,7 +611,6 @@ export default function ChatUnified({
     api: `/api/chat/${document.id}`,
     streamProtocol: 'text',
     onFinish: (_prompt, full) => {
-      console.log("[ChatUnified] full completion:", full);
       const sys: DocMessageLike = {
         role: "SYSTEM",
         content: full,

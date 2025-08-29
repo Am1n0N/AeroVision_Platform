@@ -1,6 +1,5 @@
-// app/chat/page.tsx or pages/chat.tsx - Fixed version
-'use client'; // If using App Router
 
+'use client';
 import React, { useEffect, useRef } from 'react';
 import { useChat, useUserSettings } from '@/hooks/useChat';
 import ChatInterface from '@/components/ChatInterface';
@@ -27,8 +26,7 @@ const ChatPage = () => {
 
     initialLoadRef.current = true;
 
-    console.log('ChatPage: Initial load starting...');
-
+    toast.loading('Loading chat settings and sessions...');
     // Load settings and sessions in parallel
     const loadInitialData = async () => {
       try {
@@ -36,14 +34,16 @@ const ChatPage = () => {
           fetchSettings(),
           chat.fetchSessions(false, true), // Force initial fetch
         ]);
-        console.log('ChatPage: Initial load completed');
       } catch (error) {
-        console.error('ChatPage: Initial load failed:', error);
+        toast.error('Failed to load initial data.');
       }
     };
 
-    loadInitialData();
-  }, []); // Empty dependency array - run only once
+    loadInitialData().then(() => {
+      toast.dismiss();
+      toast.success('Chat ready!');
+    });
+  }, [chat, fetchSettings]);
 
   return (
     <div className="bg-gray-50">

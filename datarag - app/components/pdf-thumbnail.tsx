@@ -28,9 +28,6 @@ const PdfThumbnail = ({ pdfUrl }: { pdfUrl: string | null }) => {
     };
   }, []);
 
-  const onLoadError = (error: any) => {
-    console.log("Error loading PDF:", error);
-  };
 
   return (
     <div>

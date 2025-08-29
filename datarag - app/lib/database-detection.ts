@@ -1,5 +1,5 @@
 // lib/database-detection.ts
-import { ChatOllama } from "@langchain/ollama";
+import { ChatGroq } from "@langchain/groq";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 
 export const DATABASE_INTENT_PROMPT = `
@@ -23,11 +23,10 @@ Examples:
 - "Explain turbulence in flights": {"isDbQuery": false, "confidence": 0.95, "reasoning": "Scientific explanation, not data query."}
 `;
 
-const model = new ChatOllama({
-  model: "gemma3:1b", // Consider upgrading to a larger model like 'llama3.1:8b' for better accuracy if available in your Ollama setup
-  temperature: 0.1, // Low for consistency
-  format: "json", // Enforce JSON output for reliability
-  baseUrl: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
+const model = new ChatGroq({
+  apiKey: process.env.GROQ_API_KEY,
+  model: "llama-3.1-8b-instant",
+  temperature: 0.2,
 });
 
 // Helper to extract and parse JSON from content
@@ -61,7 +60,6 @@ export async function isDatabaseQuery(message: string): Promise<{ isDbQuery: boo
     if (typeof parsed.isDbQuery !== 'boolean' || typeof parsed.confidence !== 'number') {
       throw new Error('Invalid response structure');
     }
-    console.log('Detection reasoning:', parsed.reasoning); // Log reasoning for debugging
     return {
       isDbQuery: parsed.isDbQuery,
       confidence: Math.min(1, Math.max(0, parsed.confidence)),

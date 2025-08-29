@@ -97,8 +97,6 @@ export async function POST(request: NextRequest) {
     if (!success || !user) return error!;
 
     const body = await request.json();
-
-    console.log('Chat API POST body:', body);
     // Handle session creation
     if (body.action === 'create') {
       try {

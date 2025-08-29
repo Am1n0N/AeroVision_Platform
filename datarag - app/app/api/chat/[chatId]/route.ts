@@ -31,7 +31,7 @@ function logWithContext(
   console.log(
     `[${timestamp}] [${level.toUpperCase()}] [DocumentChat] ${message}`,
     context ? JSON.stringify(context, null, 2) : ""
-  );
+);
 }
 
 // ---------------------------------------------

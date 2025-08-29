@@ -1,16 +1,14 @@
 // config/models.ts
 
-// ✅ GroqCloud text/STT models available today
-// (Production + Preview models from https://console.groq.com/docs/models)
-
+// ✅ GroqCloud text/STT models available today (you’re actively using these)
 export const AVAILABLE_MODELS_LIST = [
   // Production text models
   "llama-3.1-8b-instant",
-  // Preview / additional text models
-  "deepseek-r1-distill-llama-70b",
-  "qwen/qwen3-32b",
 
-  // GPT-OSS models hosted on GroqCloud (Production)
+  // Additional text models on GroqCloud
+  "deepseek-r1-distill-llama-70b",
+
+  // GPT-OSS models hosted on GroqCloud
   "openai/gpt-oss-120b",
   "openai/gpt-oss-20b",
 
@@ -27,11 +25,6 @@ export const AVAILABLE_MODELS = {
   },
   "deepseek-r1-distill-llama-70b": {
     name: "DeepSeek R1 Distill Llama 70B",
-    temperature: 0.2,
-    contextWindow: 131072,
-  },
-  "qwen/qwen3-32b": {
-    name: "Qwen 3 32B",
     temperature: 0.2,
     contextWindow: 131072,
   },
@@ -57,21 +50,25 @@ export const AVAILABLE_MODELS = {
   },
 } as const;
 
+// ✅ Pinecone index is 768-dim → keep only 768-dim embedding models
+export const EMBEDDING_MODELS = {
+  "intfloat/e5-base-v2":          { dimensions: 768, contextLength: 512, description: "E5 base (adds query/passages prefixes)", chunkSize: 256 },
+  "Alibaba-NLP/gte-base-en-v1.5": { dimensions: 768, contextLength: 512, description: "GTE base (adds query/passages prefixes)", chunkSize: 256 },
+  "BAAI/bge-base-en-v1.5":        { dimensions: 768, contextLength: 512, description: "BGE base (solid baseline)",              chunkSize: 256 },
+} as const;
 
+// Used by your evaluation UI: keep base text models and 768-dim embedding models only
 const EVAL_MODELS = {
   base: [
-    // Groq Cloud text models
-    { id: "groq/llama-3.1-8b-instant", name: "Llama 3.1 8B Instant", provider: "Groq", contextWindow: 131072 },
-    { id: "groq/deepseek-r1-distill-llama-70b", name: "DeepSeek R1 Distill Llama 70B", provider: "Groq", contextWindow: 131072 },
-    // GPT-OSS (served on GroqCloud)
-    { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B", provider: "OpenAI (via Groq)", contextWindow: 131072 },
-    { id: "openai/gpt-oss-20b", name: "GPT-OSS 20B", provider: "OpenAI (via Groq)", contextWindow: 131072 },
+    { id: "groq/llama-3.1-8b-instant",            name: "Llama 3.1 8B Instant",        provider: "Groq",               contextWindow: 131072 },
+    { id: "groq/deepseek-r1-distill-llama-70b",   name: "DeepSeek R1 Distill Llama 70B", provider: "Groq",             contextWindow: 131072 },
+    { id: "openai/gpt-oss-120b",                  name: "GPT-OSS 120B",               provider: "OpenAI (via Groq)",   contextWindow: 131072 },
+    { id: "openai/gpt-oss-20b",                   name: "GPT-OSS 20B",                provider: "OpenAI (via Groq)",   contextWindow: 131072 },
   ],
   embedding: [
-    { id: "nomic-embed-text", name: "Nomic Embed Text", dimensions: 768, contextLength: 8192, description: "RAG-tuned local embeddings" },
-    { id: "mxbai-embed-large", name: "MxBai Embed Large", dimensions: 1024, contextLength: 512, description: "High-quality semantic search" },
-    { id: "snowflake-arctic-embed", name: "Snowflake Arctic Embed", dimensions: 1024, contextLength: 512, description: "Strong retrieval performance" },
-    { id: "all-minilm", name: "All MiniLM", dimensions: 384, contextLength: 256, description: "Fast & lightweight" },
+    { id: "intfloat/e5-base-v2",          name: "E5 Base v2",            dimensions: 768, contextLength: 512, description: "Query/Passage prefixes" },
+    { id: "Alibaba-NLP/gte-base-en-v1.5", name: "GTE Base en v1.5",      dimensions: 768, contextLength: 512, description: "Query/Passage prefixes" },
+    { id: "BAAI/bge-base-en-v1.5",        name: "BGE Base en v1.5",      dimensions: 768, contextLength: 512, description: "Solid baseline" },
   ],
 } as const;
 
