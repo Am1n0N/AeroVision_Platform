@@ -5,10 +5,12 @@ import {
   handleAuthAndRateLimit,
   createErrorResponse,
   setAgentResponseHeaders,
-  validateChatRequest,
+  validateChatRequest
+} from "@/lib/agent";
+import {
   type EnhancedAgentResponse,
   type SourceReference
-} from "@/lib/agent";
+} from "@/types";
 import prismadb from "@/lib/prismadb";
 import {v4 as uuidv4 } from "uuid";
 import {AVAILABLE_MODELS_LIST} from "@/config/models";
@@ -104,7 +106,7 @@ export async function POST(request: NextRequest) {
           data: {
             id: uuidv4(),
             title: body.title || 'New Chat',
-            userId: user.id,
+            userId: (user as any).id,
             modelKey: body.modelKey,
             useDatabase: body.useDatabase ?? true,
             useKnowledgeBase: body.useKnowledgeBase ?? true,
@@ -138,7 +140,7 @@ export async function POST(request: NextRequest) {
         data: {
           id: uuidv4(),
           title: 'New Chat', // Will be updated after we get the AI response
-          userId: user.id,
+          userId: (user as any).id,
           modelKey: body.model,
           useDatabase: body.enableDatabaseQueries ?? true,
           useKnowledgeBase: body.useKnowledgeBase ?? true,
@@ -153,7 +155,7 @@ export async function POST(request: NextRequest) {
 
     // Fetch session details
     const session = await prismadb.chatSession.findUnique({
-      where: { id: sessionId, userId: user.id },
+      where: { id: sessionId, userId: (user as any).id },
       include: { messages: { orderBy: { createdAt: 'asc' } } }
     });
 
@@ -176,12 +178,12 @@ export async function POST(request: NextRequest) {
     // Check if we should handle streaming
     if (body.stream) {
       const stream = await agent.generateChatResponse(userMessage, {
-        userId: user.id,
-        userName: user.firstName || user.username || 'User',
+        userId: (user as any).id,
+        userName: (user as any).firstName || (user as any).username || 'User',
         sessionId: session.id,
       });
 
-      return new Response(stream, {
+      return new Response(stream as any, {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
           'X-Session-ID': sessionId,
@@ -194,8 +196,8 @@ export async function POST(request: NextRequest) {
 
     // Generate enhanced response with sources
     const agentResponse = await agent.generateChatResponse(userMessage, {
-      userId: user.id,
-      userName: user.firstName || user.username || 'User',
+      userId: (user as any).id,
+      userName: (user as any).firstName || (user as any).username || 'User',
       sessionId: session.id,
     });
 
@@ -206,7 +208,7 @@ export async function POST(request: NextRequest) {
         content: userMessage,
         role: 'USER',
         sessionId: session.id,
-        userId: user.id,
+        userId: (user as any).id,
       },
     });
 
@@ -217,7 +219,7 @@ export async function POST(request: NextRequest) {
         content: agentResponse.content,
         role: 'ASSISTANT',
         sessionId: session.id,
-        userId: user.id,
+        userId: (user as any).id,
         modelUsed: agentResponse.model,
         executionTime: agentResponse.executionTime,
         dbQueryUsed: agentResponse.contexts.database?.success || false,
@@ -289,7 +291,7 @@ export async function GET(request: NextRequest) {
 
       const sessions = await prismadb.chatSession.findMany({
         where: {
-          userId: user.id,
+          userId: (user as any).id,
           isArchived: archived,
         },
         orderBy: [
@@ -301,7 +303,7 @@ export async function GET(request: NextRequest) {
         },
       });
 
-      const formattedSessions = sessions.map(session => ({
+      const formattedSessions = sessions.map((session: any) => ({
         id: session.id,
         title: session.title,
         lastMessageAt: session.lastMessageAt?.toISOString() || session.createdAt.toISOString(),
@@ -322,7 +324,7 @@ export async function GET(request: NextRequest) {
       }
 
       const session = await prismadb.chatSession.findUnique({
-        where: { id: sessionId, userId: user.id },
+        where: { id: sessionId, userId: (user as any).id },
         include: {
           messages: { orderBy: { createdAt: 'asc' } },
         },
@@ -333,7 +335,7 @@ export async function GET(request: NextRequest) {
       }
 
       // Parse source references from stored metadata
-      const enhancedMessages = session.messages.map(message => {
+      const enhancedMessages = session.messages.map((message: any) => {
         let sources: SourceReference[] = [];
 
         if (message.metadata) {
@@ -402,7 +404,7 @@ export async function PUT(request: NextRequest) {
     }
 
     const session = await prismadb.chatSession.update({
-      where: { id: sessionId, userId: user.id },
+      where: { id: sessionId, userId: (user as any).id },
       data: updates,
     });
 
@@ -430,17 +432,17 @@ export async function DELETE(request: NextRequest) {
     if (archive) {
       // Archive the session
       await prismadb.chatSession.update({
-        where: { id: sessionId, userId: user.id },
+        where: { id: sessionId, userId: (user as any).id },
         data: { isArchived: true },
       });
     } else {
       // Delete the session and its messages
       await prismadb.chatMessage.deleteMany({
-        where: { sessionId, userId: user.id },
+        where: { sessionId, userId: (user as any).id },
       });
 
       await prismadb.chatSession.delete({
-        where: { id: sessionId, userId: user.id },
+        where: { id: sessionId, userId: (user as any).id },
       });
     }
 

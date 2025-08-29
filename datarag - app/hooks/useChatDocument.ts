@@ -30,6 +30,23 @@ type GetChatResponse = {
   };
 };
 
+export type ChatDocument = {
+   id: string;
+  userId: string;
+  title: string;
+  description?: string | null;
+  fileUrl?: string | null;
+};
+
+interface DocMessageLike {
+  id?: string;
+  role: "USER" | "ASSISTANT" | "SYSTEM";
+  content: string;
+  timestamp?: string;
+  userId?: string | null;
+  documentId?: string;
+}
+
 async function getChat(chatId: string): Promise<GetChatResponse> {
   const res = await fetch(`/api/chat/${chatId}`, {
     method: "GET",
@@ -41,8 +58,8 @@ async function getChat(chatId: string): Promise<GetChatResponse> {
 }
 
 const useChatDocument = (chatId: string) => {
-    const [document, setDocument] = useState<unknown>(null);
-    const [messages, setMessages] = useState<unknown[]>([]);
+    const [document, setDocument] = useState<ChatDocument | null>(null);
+    const [messages, setMessages] = useState<DocMessageLike[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
@@ -56,7 +73,7 @@ const useChatDocument = (chatId: string) => {
             if (!isLoaded) return; // wait until Clerk is ready
 
             if (!isSignedIn) {
-                redirectToSignIn({ redirectUrl: `/chat/${chatId}` });
+                redirectToSignIn({ returnBackUrl: `/chat/${chatId}` });
                 return;
             }
 
@@ -69,7 +86,7 @@ const useChatDocument = (chatId: string) => {
                     setError(null);
                 }
 
-            } catch (e: unknown) {
+            } catch (e: any) {
                 if (active) setError(e.message || "Failed to fetch document");
             } finally {
                 if (active) setLoading(false);

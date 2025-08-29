@@ -35,7 +35,7 @@ import { Streamdown } from "streamdown";
 /* ------------------------------------------------------------------ */
 /* Minimal local types                                                 */
 /* ------------------------------------------------------------------ */
-type Role = "SYSTEM" | "USER";
+type Role = "SYSTEM" | "USER" | "ASSISTANT";
 
 interface DocLike {
   id: string;
@@ -50,8 +50,8 @@ interface DocMessageLike {
   role: Role;
   content: string;
   timestamp?: string;
-  userId: string;
-  documentId: string;
+  userId?: string | null;
+  documentId?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -316,7 +316,7 @@ const Header: React.FC<{
               </span>
             </div>
             {document.description ? (
-              <p className="truncate text-xs text-muted-foreground">
+              <p className="truncate text-xs text-muted-foreground text-wrap">
                 {document.description}
               </p>
             ) : null}

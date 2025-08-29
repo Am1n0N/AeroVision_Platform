@@ -30,7 +30,7 @@ export default function SettingsPanel({ open, onClose }: Props) {
 
   const modelOptions = useMemo(() => {
     // Be resilient to either strings or objects
-    return (models || []).map((m: unknown) => {
+    return (models || []).map((m: any) => {
       if (typeof m === "string") return { value: m, label: m };
       const value = m?.id ?? m?.name ?? m?.model ?? "";
       const label = m?.label ?? m?.name ?? value;
@@ -85,7 +85,7 @@ export default function SettingsPanel({ open, onClose }: Props) {
                 <select
                   className="mt-1 w-full rounded-lg border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm"
                   value={local.theme}
-                  onChange={(e) => setLocal((s) => ({ ...s, theme: e.target.value as unknown }))}
+                  onChange={(e) => setLocal((s) => ({ ...s, theme: e.target.value as any }))}
                 >
                   <option value="system">System</option>
                   <option value="light">Light</option>

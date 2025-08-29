@@ -1,7 +1,6 @@
 import { Document } from "@prisma/client";
 import Image from "next/image";
 import { Card, CardFooter, CardHeader } from "@/components/ui/card";
-import Link from "next/link";
 import PdfThumbnail from "./pdf-thumbnail";
 import { DocumentDisplayToggle } from "./document-display-toggle";
 import { DocumentsTable } from "./documents-table";
@@ -28,24 +27,22 @@ export const Documents = ({ data, displayMode }: DocumentsProps) => {
       {data.map((document) => (
         <Card
           key={document.id}
-          className="bg-primary/10 rounded-xl cursor-pointer hover:opacity-75 transition bottom-0"
+          className="bg-primary/10 rounded-xl   bottom-0"
         >
-          <Link href={`/chat/${document.id}`}>
-            <CardHeader className="flex flex-col justify-between text-center text-muted-foreground py-4">
-              <p className="font-bold text-base pb-3 h-14 line-clamp-2">
-                {document.title}
-              </p>
-              <div className="relative h-full w-full">
-                <PdfThumbnail pdfUrl={document.fileUrl} />
-              </div>
-              <p className="text-xs line-clamp-2">{document.description}</p>
-            </CardHeader>
-            <CardFooter className="flex items-center justify-center text-xs text-muted-foreground">
-              <p className="lowercase">
-                {document.createdAt.toLocaleString()}
-              </p>
-            </CardFooter>
-          </Link>
+          <CardHeader className="flex flex-col justify-between text-center text-muted-foreground py-4">
+            <p className="font-bold text-base pb-3 h-14 line-clamp-2">
+              {document.title}
+            </p>
+            <div className="relative h-full w-full">
+              <PdfThumbnail id={document.id} pdfUrl={document.fileUrl} />
+            </div>
+            <p className="text-xs line-clamp-2">{document.description}</p>
+          </CardHeader>
+          <CardFooter className="flex items-center justify-center text-xs text-muted-foreground">
+            <p className="lowercase">
+              {document.createdAt.toLocaleString()}
+            </p>
+          </CardFooter>
         </Card>
       ))}
     </div>

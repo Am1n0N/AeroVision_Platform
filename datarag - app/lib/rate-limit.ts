@@ -70,7 +70,7 @@ export async function handleAuthAndRateLimit(
   request: Request,
   type: keyof typeof RATE_LIMITS = 'default'
 ): Promise<{
-  user: unknown;
+  user: any;
   success: boolean;
   error?: Response;
 }> {
@@ -106,7 +106,7 @@ export async function handleAuthAndRateLimit(
     }
 
     return { user, success: true };
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("Authentication or Rate Limit Check Failed:", error);
     return {
       user: null,

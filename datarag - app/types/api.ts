@@ -1,11 +1,16 @@
 // types/api.ts
+// API request/response types and legacy compatibility types
 
+// Re-export commonly used types from other modules for backward compatibility
+export type { DatabaseQueryResult } from './chat';
+
+// API-specific types that don't fit in other categories
 export interface Message {
   id?: string;
   role: "user" | "assistant" | "system";
   content: string;
   createdAt?: Date;
-  metadata?: Record<string, unknown>;
+  metadata?: import('./common').UnknownRecord;
 }
 
 export interface ChatRequest {
@@ -19,25 +24,12 @@ export interface ChatRequest {
   includePerformanceMetrics?: boolean;
 }
 
-export interface DatabaseQueryResult {
-  success: boolean;
-  data?: Record<string, unknown>[];
-  sqlQuery?: string;
-  error?: string;
-  summary?: string;
-  performance?: {
-    executionTime: number;
-    rowCount: number;
-    queryComplexity: "low" | "medium" | "high";
-  };
-}
-
 export interface ContextResult {
   database: string;
   knowledge: string;
   conversation: string;
   similar: string;
-  databaseQueryResult: DatabaseQueryResult | null;
+  databaseQueryResult: import('./chat').DatabaseQueryResult | null;
 }
 
 export interface ModelConfig {

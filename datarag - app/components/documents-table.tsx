@@ -45,7 +45,7 @@ export function DocumentsTable<TData, TValue>({
                                     <TableCell key={cell.id} className="w-1/10" onClick={() => window.location.href = `/chat/${(row.original as { id: string }).id}`}>
                                         {cell.column.id === "fileUrl" ? (
                                             <div className="relative h-full w-full">
-                                                <PdfThumbnail pdfUrl={cell.getValue() as string} />
+                                                <PdfThumbnail id={(row.original as { id: string }).id} pdfUrl={cell.getValue() as string} />
                                             </div>
                                         ) : cell.column.id === "createdAt" || cell.column.id === "updatedAt" ? (
                                             <span className="text-sm text-muted-foreground">

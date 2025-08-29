@@ -65,7 +65,7 @@ export interface EvaluationResult {
   retrievedContexts?: string[];
   metadata: {
     modelUsed?: string;
-    contextSources?: unknown;
+    contextSources?: any;
     rerankingApplied?: boolean;
     totalContextTokens?: number;
     retrievalMetrics?: {
@@ -166,6 +166,28 @@ interface MetricsData {
     avgScore: number;
     bestPerformingModel: string;
   };
+  avgScores?: {
+    overall: { mean: number; std: number; min: number; max: number; median: number };
+    retrieval: { mean: number; std: number; min: number; max: number; median: number };
+    augmentation: { mean: number; std: number; min: number; max: number; median: number };
+    generation: { mean: number; std: number; min: number; max: number; median: number };
+    relevance: { mean: number; std: number; min: number; max: number; median: number };
+    accuracy: { mean: number; std: number; min: number; max: number; median: number };
+    completeness: { mean: number; std: number; min: number; max: number; median: number };
+    coherence: { mean: number; std: number; min: number; max: number; median: number };
+  };
+  categoryPerformance?: Array<{
+    category: string;
+    avgScore: number;
+    scoreStd: number;
+    testCount: number;
+  }>;
+  difficultyPerformance?: Array<{
+    difficulty: string;
+    avgScore: number;
+    scoreStd: number;
+    testCount: number;
+  }>;
 }
 
 // helpers — keep them near the component bottom or above the component
@@ -211,10 +233,10 @@ function computeRunAnalysis(results: EvaluationResult[]) {
       completeness: scoreStats(results.map(r => r.scores.completeness)),
       coherence: scoreStats(results.map(r => r.scores.coherence)),
     },
-    modelPerformance: [] as unknown[],
-    categoryPerformance: [] as unknown[],
-    difficultyPerformance: [] as unknown[],
-    trends: [] as unknown[], // per run: show per-testCase “trend”
+    modelPerformance: [] as any[],
+    categoryPerformance: [] as any[],
+    difficultyPerformance: [] as any[],
+    trends: [] as any[], // per run: show per-testCase “trend”
   };
 
   // group helpers
@@ -222,10 +244,10 @@ function computeRunAnalysis(results: EvaluationResult[]) {
     xs.reduce((m, x) => ((m[f(x)] ||= []).push(x), m), {} as Record<K, T[]>);
 
   // model perf
-  const byModel = by(results, r => (r.model || "Unknown") as string);
+  const byModel = by(results, r => (r.model || "any") as string);
   metrics.modelPerformance = Object.entries(byModel).map(([model, rs]) => {
-    const scores = rs.map((r: unknown) => r.scores.overall);
-    const exec = rs.map((r: unknown) => r.executionTime || 0);
+    const scores = rs.map((r: any) => r.scores.overall);
+    const exec = rs.map((r: any) => r.executionTime || 0);
     const m = mean(scores);
     return {
       model,
@@ -238,26 +260,26 @@ function computeRunAnalysis(results: EvaluationResult[]) {
   });
 
   // category perf
-  const byCat = by(results, r => (r.category || "Unknown") as string);
+  const byCat = by(results, r => (r.category || "any") as string);
   metrics.categoryPerformance = Object.entries(byCat).map(([category, rs]) => {
-    const scores = rs.map((r: unknown) => r.scores.overall);
+    const scores = rs.map((r: any) => r.scores.overall);
     const m = mean(scores);
     return { category, avgScore: m, scoreStd: std(scores, m), testCount: rs.length };
   });
 
   // difficulty perf
-  const byDiff = by(results, r => (r.difficulty || "Unknown") as string);
+  const byDiff = by(results, r => (r.difficulty || "any") as string);
   metrics.difficultyPerformance = Object.entries(byDiff).map(([difficulty, rs]) => {
-    const scores = rs.map((r: unknown) => r.scores.overall);
+    const scores = rs.map((r: any) => r.scores.overall);
     const m = mean(scores);
     return { difficulty, avgScore: m, scoreStd: std(scores, m), testCount: rs.length };
   });
 
   // “trends” per test case within the run (not time-series but still helpful)
-  const byCase = by(results, r => (r.testCase || "Unknown") as string);
+  const byCase = by(results, r => (r.testCase || "any") as string);
   metrics.trends = Object.entries(byCase).map(([testCase, rs]) => ({
     testCase,
-    avgScore: mean(rs.map((r: unknown) => r.scores.overall)),
+    avgScore: mean(rs.map((r: any) => r.scores.overall)),
     testCount: rs.length,
   }));
 
@@ -565,7 +587,7 @@ function ConfigurationPanel({
       alert(`Dataset "${result.dataset.name}" uploaded with ${result.dataset.itemCount} items.`);
       setShowUploadModal(false);
       window.location.reload();
-    } catch (error: unknown) {
+    } catch (error: any) {
       console.error("Upload error:", error);
       alert(`Upload failed: ${error?.message || error}`);
     } finally {
@@ -670,8 +692,8 @@ function ConfigurationPanel({
                   <label key={c.key} className="flex items-center">
                     <input
                       type="checkbox"
-                      checked={(config as unknown)[c.key] as boolean}
-                      onChange={(e) => onChange({ [c.key]: e.target.checked } as unknown)}
+                      checked={(config as any)[c.key] as boolean}
+                      onChange={(e) => onChange({ [c.key]: e.target.checked } as any)}
                       className="w-4 h-4 rounded accent-neutral-900 dark:accent-neutral-100"
                     />
                     <c.Icon className="w-4 h-4 ml-3 mr-2 text-neutral-500 dark:text-neutral-400" />
@@ -1135,7 +1157,7 @@ export default function EvaluationSystem() {
         const res = await fetch("/api/evaluate");
         const json = await res.json();
         const items =
-          json?.evaluationRuns?.map((r: unknown) => ({
+          json?.evaluationRuns?.map((r: any) => ({
             id: r.id,
             createdAt: r.createdAt,
             title: r.title,
@@ -1179,7 +1201,10 @@ export default function EvaluationSystem() {
           if (json?.success && json?.evaluationRun?.results) {
             const results: EvaluationResult[] = JSON.parse(json.evaluationRun.results);
             const runMetrics = computeRunAnalysis(results);
-            setMetrics(runMetrics);
+            setMetrics({
+              ...runMetrics,
+              summary: json.evaluationRun.summary ?? null,
+            });
           } else {
             setMetrics(null);
           }
@@ -1398,7 +1423,7 @@ export default function EvaluationSystem() {
             if (!trimmed) continue;
 
             const snap = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
-            let evt: unknown;
+            let evt: any;
             try {
               evt = JSON.parse(snap);
             } catch {
@@ -1514,7 +1539,7 @@ export default function EvaluationSystem() {
               return (
                 <button
                   key={t.id}
-                  onClick={() => setActiveTab(t.id as unknown)}
+                  onClick={() => setActiveTab(t.id as any)}
                   className={[
                     "flex items-center px-4 py-2 rounded-lg font-medium transition-colors",
                     active ? "bg-neutral-900 text-white dark:bg-white dark:text-black" : "text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800",
@@ -1627,9 +1652,9 @@ export default function EvaluationSystem() {
             onChange={(patch) => {
               if (patch.models) setSelectedBaseModels(patch.models);
               if (patch.embeddingModel) setSelectedEmbeddingModel(patch.embeddingModel);
-              const rest: Partial<EvaluationConfig> = { ...(patch as unknown) };
-              delete (rest as unknown).models;
-              delete (rest as unknown).embeddingModel;
+              const rest: Partial<EvaluationConfig> = { ...(patch as any) };
+              delete (rest as any).models;
+              delete (rest as any).embeddingModel;
               if (Object.keys(rest).length) setConfig((prev) => ({ ...prev, ...(rest as EvaluationConfig) }));
             }}
             onDatasetChange={setSelectedDatasetId}
@@ -1894,7 +1919,7 @@ export default function EvaluationSystem() {
                     {(["retrieval", "augmentation", "generation"] as const).map((key) => {
                       const fromResults =
                         results.length > 0
-                          ? results.reduce((s, r) => s + (r.scores as unknown)[key], 0) / results.length
+                          ? results.reduce((s, r) => s + (r.scores as any)[key], 0) / results.length
                           : null;
                       const fromMetrics =
                         metrics?.avgScores?.[key]?.mean ?? 0;
@@ -1966,7 +1991,7 @@ export default function EvaluationSystem() {
                       </div>
                     ) : (
                       <div className="space-y-4">
-                        {(metrics?.categoryPerformance ?? []).map((cp: unknown) => {
+                        {(metrics && Array.isArray((metrics as any).categoryPerformance) ? (metrics as any).categoryPerformance : []).map((cp: any) => {
                           const tone = TONES[toneFromString(cp.category)];
                           const avg = cp.avgScore ?? 0;
                           return (
@@ -2027,10 +2052,11 @@ export default function EvaluationSystem() {
                       </div>
                     ) : (
                       <div className="space-y-4">
-                        {(metrics?.difficultyPerformance ?? []).map((dp: unknown) => {
+                        {(["Easy", "Medium", "Hard"] as const).map((difficulty) => {
+                          const dp = metrics?.difficultyPerformance?.find((d: any) => d.difficulty === difficulty) ?? { difficulty, avgScore: 0, testCount: 0 };
                           const avg = dp.avgScore ?? 0;
                           return (
-                            <div key={dp.difficulty} className="flex items-center justify-between p-4 rounded-lg border border-neutral-200 dark:border-neutral-800">
+                            <div key={difficulty} className="flex items-center justify-between p-4 rounded-lg border border-neutral-200 dark:border-neutral-800">
                               <div className="flex items-center space-x-3">
                                 <div className="p-2 rounded-full bg-neutral-100 dark:bg-neutral-800">
                                   <Target className="w-4 h-4 text-neutral-700 dark:text-neutral-300" />

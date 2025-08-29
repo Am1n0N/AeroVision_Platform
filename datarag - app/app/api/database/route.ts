@@ -8,9 +8,9 @@ import {
   handleAuthAndRateLimit,
   createErrorResponse,
   validateDatabaseRequest,
-  DATABASE_SCHEMA,
-  type AgentConfig,
+  DATABASE_SCHEMA
 } from "@/lib/agent";
+import { type AgentConfig } from "@/types";
 
 // Import database tools directly for GET endpoints
 import {

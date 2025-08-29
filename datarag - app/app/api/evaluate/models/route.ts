@@ -14,7 +14,7 @@ export async function GET(request: NextRequest_MD) {
     if (!authResult.success) return authResult.error;
 
     return NextResponse_MD.json({ success: true, models });
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("[models GET]", error);
     return errResp_MD(error);
   }

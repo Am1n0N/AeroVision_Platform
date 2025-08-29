@@ -3,12 +3,13 @@ import { Check, Inbox } from "lucide-react";
 import React from "react";
 import { useDropzone } from "react-dropzone";
 
-const FileUpload = ({ onFileUpload, alreadyUploaded }: { onFileUpload: unknown, alreadyUploaded: boolean }) => {
+const FileUpload = ({ onFileUpload, alreadyUploaded, disabled = false }: { onFileUpload: (file: File) => void, alreadyUploaded: boolean, disabled?: boolean }) => {
   const { getRootProps, getInputProps } = useDropzone({
     accept: { "application/pdf": [".pdf"] },
     maxFiles: 1,
-    onDrop: (acceptedFiles: unknown) => {
-        onFileUpload(acceptedFiles[0])
+    disabled,
+    onDrop: (acceptedFiles: File[]) => {
+      onFileUpload(acceptedFiles[0])
     },
   });
   return (
@@ -16,7 +17,7 @@ const FileUpload = ({ onFileUpload, alreadyUploaded }: { onFileUpload: unknown, 
       <div
         {...getRootProps({
           className:
-            "border-dashed border-2 rounded-xl cursor-pointer bg-gray-50 py-8 flex justify-center items-center flex-col",
+            `border-dashed border-2 rounded-xl ${disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'} bg-gray-50 py-8 flex justify-center items-center flex-col`,
         })}
       >
         <input {...getInputProps()} />

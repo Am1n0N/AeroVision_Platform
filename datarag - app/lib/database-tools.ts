@@ -9,6 +9,17 @@ import { z } from "zod";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { ToolMessage } from "@langchain/core/messages";
 import { wireGroqSqlRegenerator } from "@/lib/sql-regenerator-groq";
+import type {
+  QueryGenerationOptions,
+  ValidationResult,
+  ValidationError,
+  ValidationWarning,
+  RepairResult,
+  RepairAction,
+  ExecutionResult,
+  SqlRegenerator,
+  ToolCall
+} from "@/types/database";
 // -----------------------------
 // Enhanced Database Configuration
 // -----------------------------
@@ -33,11 +44,11 @@ const getPool = (): Pool => {
     pool = mysql.createPool(dbConfig);
 
     // These 'on' handlers are convenience logs; cast to any for runtime support
-    (pool as unknown).on?.("connection", (connection: unknown) => {
+    (pool as any).on?.("connection", (connection: any) => {
       log(`New connection established ${connection?.threadId ?? ""}`);
     });
 
-    (pool as unknown).on?.("error", (err: unknown) => {
+    (pool as any).on?.("error", (err: any) => {
       log("Database pool error:", err?.message);
       if (err?.code === "PROTOCOL_CONNECTION_LOST") {
         pool = null; // Force recreation on next call
@@ -99,7 +110,7 @@ const withSqlConnection = async <T>(
       }
 
       return result;
-    } catch (err: unknown) {
+    } catch (err: any) {
       if (conn && !readonly) {
         try {
           await conn.rollback();
@@ -203,10 +214,10 @@ FACT TABLE:
    - real_departure (DATETIME) - Actual departure
 
    PERFORMANCE METRICS:
-   - departure_delay_minutes (INT) - Delay in minutes (-1 = unknown)
-   - arrival_delay_minutes (INT) - Arrival delay (-1 = unknown)
+   - departure_delay_minutes (INT) - Delay in minutes (-1 = any)
+   - arrival_delay_minutes (INT) - Arrival delay (-1 = any)
    - scheduled_flight_duration_minutes (INT) - Planned duration
-   - actual_flight_duration_minutes (INT) - Actual duration (-1 = unknown)
+   - actual_flight_duration_minutes (INT) - Actual duration (-1 = any)
 
    METADATA:
    - flight_type (VARCHAR(20)) - Flight category
@@ -214,7 +225,7 @@ FACT TABLE:
    - load_date (DATETIME) - Data load timestamp
 
 KEY OPTIMIZATION NOTES:
-- Use NULLIF(column, -1) for unknown values in calculations
+- Use NULLIF(column, -1) for any values in calculations
 - Prefer country_code over country for filtering (indexed)
 - All foreign keys are indexed for optimal JOIN performance
 - Date keys enable efficient time-based analytics
@@ -298,11 +309,6 @@ SECURITY & PERFORMANCE
 // -----------------------------
 // Enhanced Query Generation
 // -----------------------------
-interface QueryGenerationOptions {
-  enforceLimit?: boolean;
-  maxLimit?: number;
-  includeBestPractices?: boolean;
-}
 
 export const generateQueryPrompt = (
   userQuestion: string,
@@ -368,7 +374,7 @@ ${limitSection}
 ${bestPracticesSection}
 
 SPECIAL HANDLING:
-- Delay metrics: use AVG(NULLIF(delay_column, -1)) to ignore unknowns.
+- Delay metrics: use AVG(NULLIF(delay_column, -1)) to ignore anys.
 - Tunisia filter: country_code = 'TN' (indexed).
 - JOIN using exact FK names from schema (airline_iata, airport_iata, date_key, status_key).
 - Date filtering should leverage indexes; avoid wrapping indexed columns in functions.
@@ -382,24 +388,6 @@ Return ONLY: {"query":"..."}
 // -----------------------------
 // Enhanced Validation System
 // -----------------------------
-interface ValidationResult {
-  isValid: boolean;
-  errors: ValidationError[];
-  warnings: ValidationWarning[];
-}
-
-interface ValidationError {
-  type: "syntax" | "dialect" | "security" | "performance";
-  message: string;
-  severity: "critical" | "high" | "medium" | "low";
-  suggestion?: string;
-}
-
-interface ValidationWarning {
-  type: "performance" | "style" | "compatibility";
-  message: string;
-  suggestion?: string;
-}
 
 // Cross-dialect detection (PostgreSQL, SQL Server, Oracle, SQLite)
 const DIALECT_PATTERNS = [
@@ -525,18 +513,6 @@ export const validateMySQLSyntax = (sql: string): ValidationResult => {
 // -----------------------------
 // Enhanced Auto-Repair System
 // -----------------------------
-interface RepairResult {
-  repairedSql: string;
-  repairs: RepairAction[];
-  success: boolean;
-}
-
-interface RepairAction {
-  type: string;
-  original: string;
-  replacement: string;
-  confidence: "high" | "medium" | "low";
-}
 
 export const repairToMySQL = (sql: string): RepairResult => {
   let repairedSql = String(sql || "");
@@ -557,11 +533,11 @@ export const repairToMySQL = (sql: string): RepairResult => {
         repairs.push({
           type,
           original: match,
-          replacement: typeof replacement === "string" ? replacement : (replacement as unknown)(match),
+          replacement: typeof replacement === "string" ? replacement : (replacement as any)(match),
           confidence,
         });
       });
-      repairedSql = repairedSql.replace(pattern, replacement as unknown);
+      repairedSql = repairedSql.replace(pattern, replacement as any);
     }
   };
 
@@ -793,7 +769,7 @@ export const extractQuery = (raw: string): string => {
 };
 
 // Alternative: More robust JSON parsing function
-export const safeJsonParse = (jsonString: string): unknown => {
+export const safeJsonParse = (jsonString: string): any => {
   try {
     return JSON.parse(jsonString);
   } catch (error) {
@@ -825,12 +801,6 @@ export const safeJsonParse = (jsonString: string): unknown => {
 // -----------------------------
 // Enhanced Regeneration System
 // -----------------------------
-export type SqlRegenerator = (args: {
-  prompt: string;
-  userQuestion?: string;
-  previousAttempts?: string[];
-  validationErrors?: ValidationError[];
-}) => Promise<string | null | undefined>;
 
 let _sqlRegenerator: SqlRegenerator | null = null;
 
@@ -879,11 +849,11 @@ Return **JSON only**: {"query":"..."}
 // -----------------------------
 // Normalizer & default SQL (NEW)
 // -----------------------------
-const normalizeExecuteSqlArgs = (raw: unknown) => {
+const normalizeExecuteSqlArgs = (raw: any) => {
   if (typeof raw === "string") {
     return { reasoning: "Auto-generated SQL execution rationale.", user_question: raw };
   }
-  const o: unknown = { ...(raw || {}) };
+  const o: any = { ...(raw || {}) };
 
   if (!o.reasoning || typeof o.reasoning !== "string" || o.reasoning.trim().length < 15) {
     o.reasoning = "Auto-generated SQL execution rationale.";
@@ -945,16 +915,16 @@ export const listTables = new DynamicStructuredTool({
            ORDER BY TABLE_NAME`,
           [dbConfig.database]
         );
-        return rows.map((r: unknown) => ({
+        return rows.map((r: any) => ({
           name: r.TABLE_NAME,
           comment: r.TABLE_COMMENT || "",
           estimated_rows: r.TABLE_ROWS || 0,
         }));
       });
 
-      tablesCache.set(cacheKey, { tables: (tables as unknown[]).map((t: unknown) => t.name), timestamp: Date.now() });
-      return JSON.stringify((tables as unknown[]).map((t: unknown) => t.name));
-    } catch (error: unknown) {
+      tablesCache.set(cacheKey, { tables: (tables as any[]).map((t: any) => t.name), timestamp: Date.now() });
+      return JSON.stringify((tables as any[]).map((t: any) => t.name));
+    } catch (error: any) {
       log("Error listing tables:", error?.message);
       return `Error listing tables: ${error?.message}. Please check database connectivity.`;
     }
@@ -996,25 +966,25 @@ export const sampleTable = new DynamicStructuredTool({
         );
 
         const columns = (fields || []).map((f: FieldPacket) => ({
-          name: (f as unknown).name,
-          type: (f as unknown).type,
-          length: (f as unknown).length,
+          name: (f as any).name,
+          type: (f as any).type,
+          length: (f as any).length,
         }));
 
-        let stats: Record<string, unknown> = {};
+        let stats: Record<string, any> = {};
         if (include_stats) {
           const [statsRows] = await conn.execute<RowDataPacket[]>(`SELECT COUNT(*) as total_rows FROM ??`, [
             table_name,
           ]);
-          stats = { total_rows: (statsRows as unknown)[0]?.total_rows || 0 };
+          stats = { total_rows: (statsRows as any)[0]?.total_rows || 0 };
         }
 
         return { columns, sample: rows as RowDataPacket[], stats };
       });
 
-      const sampleData = (result.sample as unknown[]).map((row) => {
-        const obj: Record<string, unknown> = {};
-        for (const key of Object.keys(row)) obj[key] = (row as unknown)[key];
+      const sampleData = (result.sample as any[]).map((row) => {
+        const obj: Record<string, any> = {};
+        for (const key of Object.keys(row)) obj[key] = (row as any)[key];
         return obj;
       });
 
@@ -1029,7 +999,7 @@ export const sampleTable = new DynamicStructuredTool({
         null,
         2
       );
-    } catch (error: unknown) {
+    } catch (error: any) {
       log(`Error sampling table '${table_name}':`, error?.message);
       return `Error sampling table '${table_name}': ${error?.message}. Verify table name and permissions.`;
     }
@@ -1075,7 +1045,7 @@ export const describeTable = new DynamicStructuredTool({
           [dbConfig.database, table_name]
         );
 
-        let indexes: RowDataPacket[] = [] as unknown;
+        let indexes: RowDataPacket[] = [] as any;
         if (include_indexes) {
           const [idxRows] = await conn.execute<RowDataPacket[]>(
             `SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SEQ_IN_INDEX
@@ -1090,7 +1060,7 @@ export const describeTable = new DynamicStructuredTool({
         return { columns, indexes };
       });
 
-      const columnDetails = (result.columns as unknown[]).map((col) => ({
+      const columnDetails = (result.columns as any[]).map((col) => ({
         name: col.COLUMN_NAME,
         type: col.DATA_TYPE,
         nullable: col.IS_NULLABLE === "YES",
@@ -1113,7 +1083,7 @@ export const describeTable = new DynamicStructuredTool({
         null,
         2
       );
-    } catch (error: unknown) {
+    } catch (error: any) {
       log(`Error describing table '${table_name}':`, error?.message);
       return `Error describing table '${table_name}': ${error?.message}. Verify table exists and you have access.`;
     }
@@ -1123,16 +1093,6 @@ export const describeTable = new DynamicStructuredTool({
 // -----------------------------
 // Execute SQL (tolerant + auto-gen)
 // -----------------------------
-interface ExecutionResult {
-  success: boolean;
-  data?: unknown;
-  error?: string;
-  validationResult?: ValidationResult;
-  repairResult?: RepairResult;
-  regenerationAttempts?: number;
-  finalQuery?: string;
-  executionTime?: number;
-}
 
 const ExecuteSqlArgs = z.preprocess(
   normalizeExecuteSqlArgs,
@@ -1145,7 +1105,7 @@ const ExecuteSqlArgs = z.preprocess(
       attempt_regeneration: z.boolean().default(true),
       max_regeneration_attempts: z.number().int().min(0).max(3).default(2),
     })
-    .refine((d) => Boolean((d as unknown).sql_query || (d as unknown).user_question), {
+    .refine((d) => Boolean((d as any).sql_query || (d as any).user_question), {
       message: "Provide at least one of: sql_query or user_question",
     })
 );
@@ -1199,7 +1159,7 @@ export const executeSql = new DynamicStructuredTool({
         if (!workingSql) {
           workingSql = defaultSqlFromQuestion();
         }
-      } catch (e: unknown) {
+      } catch (e: any) {
         log("Auto-generation failed, using default:", e?.message);
         workingSql = defaultSqlFromQuestion();
       }
@@ -1344,7 +1304,7 @@ export const executeSql = new DynamicStructuredTool({
     // Stage 3: Execute the validated query
     try {
       const executionResult = await withSqlConnection(async (conn) => {
-        let explainResult: unknown = null;
+        let explainResult: any = null;
 
         // Get execution plan if requested
         if (explain_plan && currentQuery.trim().toUpperCase().startsWith("SELECT")) {
@@ -1375,7 +1335,7 @@ export const executeSql = new DynamicStructuredTool({
 
       // Handle SELECT results
       if (Array.isArray(fields) && fields.length > 0) {
-        const columns = fields.map((f: unknown) => f.name);
+        const columns = fields.map((f: any) => f.name);
         const rows = Array.isArray(executionResult.rowsOrHeader)
           ? (executionResult.rowsOrHeader as RowDataPacket[])
           : [];
@@ -1415,12 +1375,12 @@ export const executeSql = new DynamicStructuredTool({
       result.success = true;
       result.data = nonSelectResponse;
       return JSON.stringify(nonSelectResponse, null, 2);
-    } catch (executionError: unknown) {
+    } catch (executionError: any) {
       log("SQL execution error:", executionError?.message);
 
       const errorResponse = {
         success: false,
-        error: executionError?.message || "Unknown execution error",
+        error: executionError?.message || "any execution error",
         sql_state: executionError?.sqlState,
         error_code: executionError?.code,
         query_used: currentQuery,
@@ -1446,27 +1406,26 @@ export const executeSql = new DynamicStructuredTool({
 // -----------------------------
 export const getAvailableTools = () => [listTables, sampleTable, describeTable, executeSql];
 
-export type ToolCall = { name: string; args: unknown; id: string };
 
 export const callTool = async (toolCall: ToolCall): Promise<ToolMessage> => {
   const toolsByName = Object.fromEntries(getAvailableTools().map((t) => [t.name, t]));
-  const tool = toolsByName[toolCall.name as keyof typeof toolsByName] as unknown;
+  const tool = toolsByName[toolCall.name as keyof typeof toolsByName] as any;
 
   if (!tool) {
-    throw new Error(`Unknown tool: ${toolCall.name}. Available tools: ${Object.keys(toolsByName).join(", ")}`);
+    throw new Error(`any tool: ${toolCall.name}. Available tools: ${Object.keys(toolsByName).join(", ")}`);
   }
 
   try {
-    const content = await tool.invoke(toolCall.args as unknown);
+    const content = await tool.invoke(toolCall.args as any);
     return new ToolMessage({
       content: String(content),
-      tool_call_id: (toolCall as unknown).id,
+      tool_call_id: (toolCall as any).id,
       name: tool.name,
     });
-  } catch (error: unknown) {
+  } catch (error: any) {
     return new ToolMessage({
       content: `Tool execution failed: ${error?.message}`,
-      tool_call_id: (toolCall as unknown).id,
+      tool_call_id: (toolCall as any).id,
       name: tool.name,
     });
   }
@@ -1503,7 +1462,7 @@ try {
 /**
  * Test database connectivity
  */
-export const testConnection = async (): Promise<{ success: boolean; message: string; details?: unknown }> => {
+export const testConnection = async (): Promise<{ success: boolean; message: string; details?: any }> => {
   try {
     const result = await withSqlConnection(async (conn) => {
       const [rows] = await conn.execute("SELECT 1 as test, CONNECTION_ID() as connection_id, VERSION() as version");
@@ -1515,7 +1474,7 @@ export const testConnection = async (): Promise<{ success: boolean; message: str
       message: "Database connection successful",
       details: result,
     };
-  } catch (error: unknown) {
+  } catch (error: any) {
     return {
       success: false,
       message: `Database connection failed: ${error.message}`,
@@ -1532,15 +1491,15 @@ export const getDatabaseHealth = async (): Promise<string> => {
     const health = await withSqlConnection(async (conn) => {
       const [variables] = (await conn.execute(
         "SHOW GLOBAL STATUS WHERE Variable_name IN ('Connections', 'Threads_connected', 'Threads_running', 'Uptime')"
-      )) as [RowDataPacket[], unknown];
+      )) as [RowDataPacket[], any];
 
       const [processlist] = (await conn.execute(
         "SELECT COUNT(*) as active_connections FROM INFORMATION_SCHEMA.PROCESSLIST"
-      )) as [RowDataPacket[], unknown];
+      )) as [RowDataPacket[], any];
 
       return {
         global_status: variables,
-        active_connections: (processlist as unknown)[0]?.active_connections || 0,
+        active_connections: (processlist as any)[0]?.active_connections || 0,
         pool_config: {
           connection_limit: dbConfig.connectionLimit,
           database: dbConfig.database,
@@ -1551,7 +1510,7 @@ export const getDatabaseHealth = async (): Promise<string> => {
     });
 
     return JSON.stringify(health, null, 2);
-  } catch (error: unknown) {
+  } catch (error: any) {
     return JSON.stringify(
       {
         success: false,

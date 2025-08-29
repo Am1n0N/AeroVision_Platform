@@ -57,12 +57,20 @@ export async function isDatabaseQuery(message: string): Promise<{ isDbQuery: boo
     ]);
     const parsed = extractJson(response.content as string);
     // Validate and sanitize output
-    if (typeof parsed.isDbQuery !== 'boolean' || typeof parsed.confidence !== 'number') {
+    // Type guard for unknown
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      !('isDbQuery' in parsed) ||
+      !('confidence' in parsed) ||
+      typeof (parsed as any).isDbQuery !== 'boolean' ||
+      typeof (parsed as any).confidence !== 'number'
+    ) {
       throw new Error('Invalid response structure');
     }
     return {
-      isDbQuery: parsed.isDbQuery,
-      confidence: Math.min(1, Math.max(0, parsed.confidence)),
+      isDbQuery: (parsed as any).isDbQuery,
+      confidence: Math.min(1, Math.max(0, (parsed as any).confidence)),
     };
   } catch (error) {
     console.error("LLM intent detection failed:", error);

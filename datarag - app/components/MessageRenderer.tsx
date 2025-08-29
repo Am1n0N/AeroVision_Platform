@@ -14,7 +14,7 @@ interface SourceReference {
   pageNumber?: number;
   snippet: string;
   relevanceScore?: number;
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, any>;
   url?: string;
   timestamp?: string;
 }
@@ -48,11 +48,11 @@ const MessageRenderer: React.FC<MessageRendererProps> = ({ message, className = 
   // Fallback JSON/<think> parser
   const parseMessage = (content: string): ParsedMessage => {
     try {
-      const parsed = JSON.parse(content as unknown);
-      if (parsed && typeof parsed === 'object' && (parsed as unknown).content) {
+      const parsed = JSON.parse(content as any);
+      if (parsed && typeof parsed === 'object' && (parsed as any).content) {
         return {
-          thinking: (parsed as unknown).thinking || undefined,
-          content: (parsed as unknown).content || (parsed as unknown).answer || content,
+          thinking: (parsed as any).thinking || undefined,
+          content: (parsed as any).content || (parsed as any).answer || content,
         };
       }
     } catch {}

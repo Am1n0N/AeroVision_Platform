@@ -7,7 +7,7 @@ import { EvaluationResult } from "@/lib/eval/engine";
 export async function GET(request: NextRequest) {
   try {
     const authResult = await handleAuthAndRateLimit(request);
-    if (!authResult.success) return authResult.error;
+    if (!authResult.success || !authResult.user) return authResult.error!;
 
     const { searchParams } = new URL(request.url);
     const timeRange = searchParams.get("timeRange") || "7d";
@@ -202,7 +202,7 @@ export async function GET(request: NextRequest) {
           difficulty: difficultyFilter
         },
         historicalComparison,
-        savedModelPerformances: savedModelPerformances.map(perf => ({
+        savedModelPerformances: savedModelPerformances.map((perf: any) => ({
           modelId: perf.modelId,
           modelName: perf.modelName,
           avgScore: perf.avgScore,
@@ -529,17 +529,17 @@ async function getDetailedAnalytics(
     const queryAnalytics = {
       totalQueries: queryHistory.length,
       successRate: queryHistory.length > 0 ?
-        (queryHistory.filter(q => q.success).length / queryHistory.length) * 100 : 0,
+        (queryHistory.filter((q: { success: boolean }) => q.success).length / queryHistory.length) * 100 : 0,
       avgExecutionTime: queryHistory.length > 0 ?
-        queryHistory.reduce((s, q) => s + (q.executionTime || 0), 0) / queryHistory.length : 0,
-      mostCommonErrors: getMostCommonErrors(queryHistory.filter(q => !q.success)),
+        queryHistory.reduce((s: number, q: { executionTime?: number }) => s + (q.executionTime || 0), 0) / queryHistory.length : 0,
+      mostCommonErrors: getMostCommonErrors(queryHistory.filter((q: { success: boolean }) => !q.success)),
     };
 
     // Analyze evaluation events
     const eventAnalytics = {
       totalEvents: analyticsEvents.length,
       eventTypes: getEventTypeBreakdown(analyticsEvents),
-      errorRate: analyticsEvents.filter(e => e.eventType.includes("error")).length / Math.max(1, analyticsEvents.length) * 100,
+      errorRate: analyticsEvents.filter((e: { eventType: string }) => e.eventType.includes("error")).length / Math.max(1, analyticsEvents.length) * 100,
       avgSessionDuration: getAvgSessionDuration(analyticsEvents),
     };
 
@@ -567,28 +567,28 @@ async function getDetailedAnalytics(
   }
 }
 
-function getMostCommonErrors(failedQueries: any[]) {
-  const errorCounts = failedQueries.reduce((acc, query) => {
+function getMostCommonErrors(failedQueries: Array<{ errorMessage?: string }>) {
+  const errorCounts = failedQueries.reduce((acc: Record<string, number>, query) => {
     const error = query.errorMessage || "Unknown error";
     acc[error] = (acc[error] || 0) + 1;
     return acc;
   }, {} as Record<string, number>);
 
   return Object.entries(errorCounts)
-    .sort(([, a], [, b]) => b - a)
+    .sort(([, a], [, b]) => (b as number) - (a as number))
     .slice(0, 5)
     .map(([error, count]) => ({ error, count }));
 }
 
-function getEventTypeBreakdown(events: any[]) {
-  return events.reduce((acc, event) => {
+function getEventTypeBreakdown(events: Array<{ eventType: string }>) {
+  return events.reduce((acc: Record<string, number>, event) => {
     acc[event.eventType] = (acc[event.eventType] || 0) + 1;
     return acc;
   }, {} as Record<string, number>);
 }
 
-function getAvgSessionDuration(events: any[]) {
-  const sessions = events.reduce((acc, event) => {
+function getAvgSessionDuration(events: Array<{ sessionId?: string; timestamp: Date }>) {
+  const sessions = events.reduce((acc: Record<string, { start: Date; end: Date }>, event) => {
     if (!event.sessionId) return acc;
 
     if (!acc[event.sessionId]) {
@@ -600,7 +600,7 @@ function getAvgSessionDuration(events: any[]) {
     return acc;
   }, {} as Record<string, { start: Date; end: Date }>);
 
-  const durations = Object.values(sessions).map(session =>
+  const durations = Object.values(sessions).map((session: { start: Date; end: Date }) =>
     new Date(session.end).getTime() - new Date(session.start).getTime()
   );
 

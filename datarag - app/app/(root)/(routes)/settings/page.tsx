@@ -4,7 +4,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { Loader2, Save, CheckCircle2, Undo2 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useUserSettings, useModels } from "@/hooks/useChat";
+import { useUserSettings, useModels, UserSettings } from "@/hooks/useChat";
 import { useTheme } from "next-themes";
 
 type Settings = {
@@ -66,8 +66,18 @@ export default function SettingsPage() {
   const modelOptions = useMemo(() => {
     return (models || []).map((m: unknown) => {
       if (typeof m === "string") return { value: m, label: m };
-      const value = m?.id ?? m?.name ?? m?.model ?? "";
-      const label = m?.label ?? m?.name ?? value;
+      const value = (typeof m === "object" && m !== null && "id" in m && typeof (m as any).id === "string")
+        ? (m as any).id
+        : (typeof m === "object" && m !== null && "name" in m && typeof (m as any).name === "string")
+          ? (m as any).name
+          : (typeof m === "object" && m !== null && "model" in m && typeof (m as any).model === "string")
+            ? (m as any).model
+            : "";
+      const label = (typeof m === "object" && m !== null && "label" in m && typeof (m as any).label === "string")
+        ? (m as any).label
+        : (typeof m === "object" && m !== null && "name" in m && typeof (m as any).name === "string")
+          ? (m as any).name
+          : value;
       return { value, label };
     });
   }, [models]);
@@ -107,7 +117,7 @@ export default function SettingsPage() {
 
   const handleSave = useCallback(async () => {
     setSaving(true);
-    const ok = await updateSettings(local as unknown);
+    const ok = await updateSettings(local as UserSettings);
     if (ok) {
       setTheme(local.theme);
       setSaved(true);

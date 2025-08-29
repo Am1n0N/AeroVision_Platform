@@ -46,19 +46,19 @@ interface SourceReference {
   pageNumber?: number;
   snippet: string;
   relevanceScore?: number;
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, any>;
   url?: string;
   timestamp?: string;
 }
 
 interface ChatInterfaceProps {
-  chat: unknown;     // keeping as any to match existing app types
-  settings: unknown; // keeping as any to match existing app types
+  chat: any;     // keeping as any to match existing app types
+  settings: any; // keeping as any to match existing app types
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
   const [inputMessage, setInputMessage] = useState('');
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(settings.sidebarCollapsed || false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState((settings as any).sidebarCollapsed || false);
   const [searchTerm, setSearchTerm] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
@@ -79,7 +79,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
 
   // keep sidebarCollapsed in sync with the prop on mount
   useEffect(() => {
-    setSidebarCollapsed(settings.sidebarCollapsed || false);
+    setSidebarCollapsed((settings as any).sidebarCollapsed || false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -188,7 +188,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
 
   const filteredSessions = React.useMemo(
     () =>
-      sessions.filter((session: unknown) =>
+      sessions.filter((session: any) =>
         String(session.title || '').toLowerCase().includes(searchTerm.toLowerCase())
       ),
     [sessions, searchTerm]
@@ -344,7 +344,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
   };
 
   const SessionDropdown = ({ sessionId }: { sessionId: string }) => {
-    const session = sessions.find((s: unknown) => s.id === sessionId);
+    const session = sessions.find((s: any) => s.id === sessionId);
     if (!session) return null;
 
     return (
@@ -467,7 +467,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                 </div>
               ) : (
                 <>
-                  {filteredSessions.map((session: unknown) => (
+                  {filteredSessions.map((session: any) => (
                     <div
                       key={session.id}
                       className={`group relative p-3 rounded-lg cursor-pointer transition-colors mb-1 ${currentSession?.id === session.id

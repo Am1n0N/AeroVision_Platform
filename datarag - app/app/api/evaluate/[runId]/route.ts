@@ -12,7 +12,7 @@ export async function GET(request: NextRequest_Run, { params }: { params: { runI
     if (!authResult.success) return authResult.error;
 
     const run = await prismadb.evaluationRun.findFirst({
-      where: { id: params.runId, userId: authResult.user.id },
+      where: { id: params.runId, userId: (authResult.user as any).id },
     });
 
     if (!run) {
@@ -31,7 +31,7 @@ export async function GET(request: NextRequest_Run, { params }: { params: { runI
         executionTime: run.executionTime,
       },
     });
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("[evaluation GET by id]", error);
     return errResp_Run(error);
   }

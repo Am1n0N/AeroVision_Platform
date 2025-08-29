@@ -10,6 +10,9 @@ export async function POST(request: NextRequest) {
   try {
     const authResult = await handleAuthAndRateLimit(request);
     if (!authResult.success) return authResult.error;
+    if (!authResult.user) return new NextResponse("Unauthorized. User not found.", { status: 401 });
+
+    const { user } = authResult;
 
     const { searchParams } = new URL(request.url);
     const wantsStream = searchParams.get("stream") === "1";
@@ -41,7 +44,7 @@ export async function POST(request: NextRequest) {
         const savedDataset = await prismadb.evaluationDataset.findFirst({
           where: {
             id: datasetId,
-            userId: authResult.user.id,
+            userId: user.id,
           },
         });
         if (savedDataset) {
@@ -78,7 +81,7 @@ export async function POST(request: NextRequest) {
       // Create the run with enhanced metadata
       const run = await prismadb.evaluationRun.create({
         data: {
-          userId: authResult.user.id,
+          userId: user.id,
           config: JSON.stringify({
             ...config,
             datasetId,
@@ -94,7 +97,7 @@ export async function POST(request: NextRequest) {
       // Log analytics event for run start
       await prismadb.analyticsEvent.create({
         data: {
-          userId: authResult.user.id,
+          userId: user.id,
           eventType: "evaluation_streaming_start",
           sessionId: `eval-${run.id}`,
           metadata: JSON.stringify({
@@ -107,13 +110,13 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      const engine = new EvaluationEngine(config, authResult.user.id);
+      const engine = new EvaluationEngine(config, user.id);
       await engine.initializeMemory();
 
-      const sse = (obj: unknown) => `data: ${JSON.stringify(obj)}\n\n`;
+      const sse = (obj: any) => `data: ${JSON.stringify(obj)}\n\n`;
       const stream = new ReadableStream({
         async start(controller) {
-          const push = (obj: unknown) => controller.enqueue(encoder.encode(sse(obj)));
+          const push = (obj: any) => controller.enqueue(encoder.encode(sse(obj)));
 
           // Enhanced safe update with more comprehensive tracking
           const safeUpdate = async (allResults: any[], currentModel?: string, progress?: number) => {
@@ -140,7 +143,7 @@ export async function POST(request: NextRequest) {
                   await prismadb.modelPerformance.upsert({
                     where: {
                       userId_modelId: {
-                        userId: authResult.user.id,
+                        userId: user.id,
                         modelId: currentModel,
                       },
                     },
@@ -158,7 +161,7 @@ export async function POST(request: NextRequest) {
                       coherenceScore: modelResults.reduce((s, r) => s + r.scores.coherence, 0) / modelResults.length,
                     },
                     create: {
-                      userId: authResult.user.id,
+                      userId: user.id,
                       modelId: currentModel,
                       modelName: currentModel,
                       avgScore: modelAvgScore,
@@ -181,7 +184,7 @@ export async function POST(request: NextRequest) {
               if (progress !== undefined) {
                 await prismadb.analyticsEvent.create({
                   data: {
-                    userId: authResult.user.id,
+                    userId: user.id,
                     eventType: "evaluation_progress",
                     sessionId: `eval-${run.id}`,
                     metadata: JSON.stringify({
@@ -268,7 +271,7 @@ export async function POST(request: NextRequest) {
                 await prismadb.evaluationMetrics.upsert({
                   where: {
                     userId_date_metric: {
-                      userId: authResult.user.id,
+                      userId: user.id,
                       date: today,
                       metric: metricType,
                     },
@@ -278,7 +281,7 @@ export async function POST(request: NextRequest) {
                     testCount: allResults.length,
                   },
                   create: {
-                    userId: authResult.user.id,
+                    userId: user.id,
                     date: today,
                     metric: metricType,
                     value: isFinite(value) ? value : 0,
@@ -291,7 +294,7 @@ export async function POST(request: NextRequest) {
             // Log completion
             await prismadb.analyticsEvent.create({
               data: {
-                userId: authResult.user.id,
+                userId: user.id,
                 eventType: "evaluation_streaming_complete",
                 sessionId: `eval-${run.id}`,
                 metadata: JSON.stringify({
@@ -317,7 +320,7 @@ export async function POST(request: NextRequest) {
             // Log error
             await prismadb.analyticsEvent.create({
               data: {
-                userId: authResult.user.id,
+                userId: user.id,
                 eventType: "evaluation_streaming_error",
                 sessionId: `eval-${run.id}`,
                 metadata: JSON.stringify({
@@ -331,7 +334,7 @@ export async function POST(request: NextRequest) {
 
             push({
               type: "error",
-              message: err?.message || "unknown error",
+              message: err?.message || "any error",
               runId: run.id,
               completedTests,
               totalTests: plannedTests,
@@ -352,7 +355,7 @@ export async function POST(request: NextRequest) {
     }
 
     // --- NON-STREAMING BRANCH (Enhanced) -------------------------------------------
-    const engine = new EvaluationEngine(config, authResult.user.id);
+    const engine = new EvaluationEngine(config, user.id);
     const results = await engine.runEvaluation(evaluationDataset);
 
     // Enhanced run persistence with better error handling
@@ -360,7 +363,7 @@ export async function POST(request: NextRequest) {
     try {
       const run = await prismadb.evaluationRun.create({
         data: {
-          userId: authResult.user.id,
+          userId: user.id,
           config: JSON.stringify({
             ...config,
             datasetId,
@@ -377,7 +380,7 @@ export async function POST(request: NextRequest) {
       // Log non-streaming completion
       await prismadb.analyticsEvent.create({
         data: {
-          userId: authResult.user.id,
+          userId: user.id,
           eventType: "evaluation_batch_complete",
           sessionId: `eval-${run.id}`,
           metadata: JSON.stringify({
@@ -394,7 +397,7 @@ export async function POST(request: NextRequest) {
       // Log error
       await prismadb.analyticsEvent.create({
         data: {
-          userId: authResult.user.id,
+          userId: user.id,
           eventType: "evaluation_batch_error",
           metadata: JSON.stringify({
             error: "Failed to save run",
@@ -417,19 +420,19 @@ export async function POST(request: NextRequest) {
         difficultyBreakdown: getDifficultyBreakdown(results),
       },
     });
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("[evaluation POST]", error);
 
     // Log general error
     try {
       const authResult = await handleAuthAndRateLimit(request);
-      if (authResult.success) {
+      if (authResult.success && authResult.user) {
         await prismadb.analyticsEvent.create({
           data: {
             userId: authResult.user.id,
             eventType: "evaluation_error",
             metadata: JSON.stringify({
-              error: (error as Error)?.message || "Unknown error",
+              error: (error as Error)?.message || "any error",
             }),
           },
         });
@@ -446,6 +449,9 @@ export async function GET(request: NextRequest) {
   try {
     const authResult = await handleAuthAndRateLimit(request);
     if (!authResult.success) return authResult.error;
+    if (!authResult.user) return new NextResponse("Unauthorized. User not found.", { status: 401 });
+
+    const { user } = authResult;
 
     const { searchParams } = new URL(request.url);
     const limit = parseInt(searchParams.get("limit") || "20");
@@ -454,7 +460,7 @@ export async function GET(request: NextRequest) {
 
     // Enhanced query with better filtering and sorting
     const runs = await prismadb.evaluationRun.findMany({
-      where: { userId: authResult.user.id },
+      where: { userId: user.id },
       orderBy: { createdAt: "desc" },
       take: limit,
       skip: offset,
@@ -462,10 +468,10 @@ export async function GET(request: NextRequest) {
 
     // Get total count for pagination
     const totalCount = await prismadb.evaluationRun.count({
-      where: { userId: authResult.user.id },
+      where: { userId: user.id },
     });
 
-    const evaluationRuns = runs.map((run) => {
+    const evaluationRuns = runs.map((run: any) => {
       const config = JSON.parse(run.config);
       return {
         id: run.id,
@@ -505,7 +511,7 @@ export async function GET(request: NextRequest) {
       const [recentAnalytics, modelPerformances] = await Promise.all([
         prismadb.analyticsEvent.findMany({
           where: {
-            userId: authResult.user.id,
+            userId: user.id,
             eventType: { in: ["evaluation_batch_complete", "evaluation_streaming_complete"] },
             timestamp: { gte: thirtyDaysAgo },
           },
@@ -513,18 +519,18 @@ export async function GET(request: NextRequest) {
           take: 50,
         }),
         prismadb.modelPerformance.findMany({
-          where: { userId: authResult.user.id },
+          where: { userId: user.id },
           orderBy: { lastEvaluated: "desc" },
         }),
       ]);
 
       response.analytics = {
-        recentActivity: recentAnalytics.map(event => ({
+        recentActivity: recentAnalytics.map((event: any) => ({
           type: event.eventType,
           timestamp: event.timestamp,
           metadata: event.metadata ? JSON.parse(event.metadata) : null,
         })),
-        modelPerformances: modelPerformances.map(perf => ({
+        modelPerformances: modelPerformances.map((perf: any) => ({
           modelId: perf.modelId,
           modelName: perf.modelName,
           avgScore: perf.avgScore,
@@ -545,7 +551,7 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json(response);
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("[evaluation GET history]", error);
     return createErrorResponse(error);
   }
@@ -556,7 +562,7 @@ function getCategoryBreakdown(results: any[]) {
   const breakdown: Record<string, { count: number; avgScore: number }> = {};
 
   for (const result of results) {
-    const category = result.category || "Unknown";
+    const category = result.category || "any";
     if (!breakdown[category]) {
       breakdown[category] = { count: 0, avgScore: 0 };
     }
@@ -575,7 +581,7 @@ function getDifficultyBreakdown(results: any[]) {
   const breakdown: Record<string, { count: number; avgScore: number }> = {};
 
   for (const result of results) {
-    const difficulty = result.difficulty || "Unknown";
+    const difficulty = result.difficulty || "any";
     if (!breakdown[difficulty]) {
       breakdown[difficulty] = { count: 0, avgScore: 0 };
     }

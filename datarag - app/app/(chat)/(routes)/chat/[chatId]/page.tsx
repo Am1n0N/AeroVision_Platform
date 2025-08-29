@@ -111,6 +111,8 @@ const ErrorCard: React.FC<{ message?: string; onRetry?: () => void }> = ({ messa
   );
 };
 
+
+
 /* ------------------------------ Page ------------------------------ */
 
 const ChatIdPage: React.FC<ChatIdPageProps> = ({ params }) => {

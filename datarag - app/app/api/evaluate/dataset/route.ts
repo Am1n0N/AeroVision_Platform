@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
     // Check for duplicate dataset names
     const existingDataset = await prismadb.evaluationDataset.findFirst({
       where: {
-        userId: authResult.user.id,
+        userId: (authResult.user as any).id,
         name,
       },
     });
@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
     // Create dataset with enhanced metadata
     const ds = await prismadb.evaluationDataset.create({
       data: {
-        userId: authResult.user.id,
+        userId: (authResult.user as any).id,
         name,
         description: description || "",
         dataset: JSON.stringify(dataset),
@@ -61,14 +61,14 @@ export async function POST(request: NextRequest) {
     // Log analytics event
     await prismadb.analyticsEvent.create({
       data: {
-        userId: authResult.user.id,
+        userId: (authResult.user as any).id,
         eventType: "dataset_created",
         metadata: JSON.stringify({
           datasetId: ds.id,
           name,
           itemCount: dataset.length,
-          categories: [...new Set(dataset.map((item: any) => item.category))],
-          difficulties: [...new Set(dataset.map((item: any) => item.difficulty))],
+          categories: Array.from(new Set(dataset.map((item: any) => item.category))),
+          difficulties: Array.from(new Set(dataset.map((item: any) => item.difficulty))),
         }),
       },
     });
@@ -78,7 +78,7 @@ export async function POST(request: NextRequest) {
       title: `Evaluation Case: ${item.id}`,
       content: `Question: ${item.question}\n\nGround Truth: ${item.groundTruth}\n\nContext: ${item.context || ''}`,
       category: `evaluation_${item.category.toLowerCase()}`,
-      userId: authResult.user.id,
+      userId: (authResult.user as any).id,
       isPublic: false,
       metadata: JSON.stringify({
         type: 'evaluation_dataset',
@@ -106,11 +106,11 @@ export async function POST(request: NextRequest) {
         itemCount: ds.itemCount,
         createdAt: ds.createdAt,
         isActive: ds.isActive,
-        categories: [...new Set(dataset.map((item: any) => item.category))],
-        difficulties: [...new Set(dataset.map((item: any) => item.difficulty))],
+        categories: Array.from(new Set(dataset.map((item: any) => item.category))),
+        difficulties: Array.from(new Set(dataset.map((item: any) => item.difficulty))),
       },
     });
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("[dataset POST]", error);
     return createErrorResponse(error);
   }
@@ -127,7 +127,7 @@ export async function GET(request: NextRequest) {
 
     // Get user datasets with optional filtering
     const whereClause = {
-      userId: authResult.user.id,
+      userId: (authResult.user as any).id,
       ...(includeInactive ? {} : { isActive: true }),
     };
 
@@ -147,7 +147,7 @@ export async function GET(request: NextRequest) {
 
     // Enhanced dataset information with analytics
     const enhancedItems = await Promise.all(
-      items.map(async (item) => {
+      items.map(async (item: any) => {
         const enhancedItem: any = {
           ...item,
           isDefault: false,
@@ -157,7 +157,7 @@ export async function GET(request: NextRequest) {
           // Get usage statistics
           const usageStats = await prismadb.evaluationRun.findMany({
             where: {
-              userId: authResult.user.id,
+              userId: (authResult.user as any).id,
               config: {
                 contains: item.id, // Simple check - in production you might want to parse JSON
               },
@@ -174,9 +174,9 @@ export async function GET(request: NextRequest) {
             usageCount: usageStats.length,
             lastUsed: usageStats.length > 0 ? usageStats[0].createdAt : null,
             avgPerformance: usageStats.length > 0
-              ? usageStats.reduce((sum, run) => sum + run.avgScore, 0) / usageStats.length
+              ? usageStats.reduce((sum: any, run: any) => sum + run.avgScore, 0) / usageStats.length
               : null,
-            totalTestsRun: usageStats.reduce((sum, run) => sum + run.totalTests, 0),
+            totalTestsRun: usageStats.reduce((sum: any, run: any) => sum + run.totalTests, 0),
           };
 
           // Get dataset composition
@@ -188,8 +188,8 @@ export async function GET(request: NextRequest) {
 
             if (fullDataset?.dataset) {
               const parsedDataset = JSON.parse(fullDataset.dataset);
-              const categories = [...new Set(parsedDataset.map((item: any) => item.category))];
-              const difficulties = [...new Set(parsedDataset.map((item: any) => item.difficulty))];
+              const categories = Array.from(new Set(parsedDataset.map((item: any) => item.category)));
+              const difficulties = Array.from(new Set(parsedDataset.map((item: any) => item.difficulty)));
 
               enhancedItem.composition = {
                 categories: categories.map(cat => ({
@@ -227,7 +227,7 @@ export async function GET(request: NextRequest) {
       // Get usage of default dataset
       const defaultUsageStats = await prismadb.evaluationRun.findMany({
         where: {
-          userId: authResult.user.id,
+          userId: (authResult.user as any).id,
           config: {
             not: {
               contains: '"datasetId":', // Runs that don't specify a custom dataset
@@ -246,17 +246,17 @@ export async function GET(request: NextRequest) {
         usageCount: defaultUsageStats.length,
         lastUsed: defaultUsageStats.length > 0 ? defaultUsageStats[0].createdAt : null,
         avgPerformance: defaultUsageStats.length > 0
-          ? defaultUsageStats.reduce((sum, run) => sum + run.avgScore, 0) / defaultUsageStats.length
+          ? defaultUsageStats.reduce((sum: any, run: any) => sum + run.avgScore, 0) / defaultUsageStats.length
           : null,
-        totalTestsRun: defaultUsageStats.reduce((sum, run) => sum + run.totalTests, 0),
+        totalTestsRun: defaultUsageStats.reduce((sum: any, run: any) => sum + run.totalTests, 0),
       };
 
       (defaultDatasetInfo as any).composition = {
-        categories: [...new Set(DEFAULT_EVALUATION_DATASET.map(item => item.category))].map(cat => ({
+        categories: Array.from(new Set(DEFAULT_EVALUATION_DATASET.map(item => item.category))).map(cat => ({
           name: cat,
           count: DEFAULT_EVALUATION_DATASET.filter(item => item.category === cat).length,
         })),
-        difficulties: [...new Set(DEFAULT_EVALUATION_DATASET.map(item => item.difficulty))].map(diff => ({
+        difficulties: Array.from(new Set(DEFAULT_EVALUATION_DATASET.map(item => item.difficulty))).map(diff => ({
           name: diff,
           count: DEFAULT_EVALUATION_DATASET.filter(item => item.difficulty === diff).length,
         })),
@@ -268,11 +268,11 @@ export async function GET(request: NextRequest) {
       datasets: [defaultDatasetInfo, ...enhancedItems],
       summary: {
         total: items.length + 1, // +1 for default
-        active: items.filter(item => item.isActive).length + 1,
-        totalItems: items.reduce((sum, item) => sum + item.itemCount, 0) + DEFAULT_EVALUATION_DATASET.length,
+        active: items.filter((item: { isActive: boolean }) => item.isActive).length + 1,
+        totalItems: items.reduce((sum: number, item: { itemCount: number }) => sum + item.itemCount, 0) + DEFAULT_EVALUATION_DATASET.length,
       },
     });
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("[dataset GET]", error);
     return createErrorResponse(error);
   }
@@ -295,7 +295,7 @@ export async function PUT(request: NextRequest) {
     const existingDataset = await prismadb.evaluationDataset.findFirst({
       where: {
         id,
-        userId: authResult.user.id,
+        userId: (authResult.user as any).id,
       },
     });
 
@@ -339,7 +339,7 @@ export async function PUT(request: NextRequest) {
     // Log analytics event
     await prismadb.analyticsEvent.create({
       data: {
-        userId: authResult.user.id,
+        userId: (authResult.user as any).id,
         eventType: "dataset_updated",
         metadata: JSON.stringify({
           datasetId: id,
@@ -360,7 +360,7 @@ export async function PUT(request: NextRequest) {
         updatedAt: updatedDataset.updatedAt,
       },
     });
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("[dataset PUT]", error);
     return createErrorResponse(error);
   }
@@ -382,7 +382,7 @@ export async function DELETE(request: NextRequest) {
     const existingDataset = await prismadb.evaluationDataset.findFirst({
       where: {
         id,
-        userId: authResult.user.id,
+        userId: (authResult.user as any).id,
       },
     });
 
@@ -393,7 +393,7 @@ export async function DELETE(request: NextRequest) {
     // Check if dataset is being used in any runs
     const usageCount = await prismadb.evaluationRun.count({
       where: {
-        userId: authResult.user.id,
+        userId: (authResult.user as any).id,
         config: {
           contains: id,
         },
@@ -404,7 +404,7 @@ export async function DELETE(request: NextRequest) {
     try {
       await prismadb.knowledgeBaseEntry.deleteMany({
         where: {
-          userId: authResult.user.id,
+          userId: (authResult.user as any).id,
           metadata: {
             contains: `"datasetId":"${id}"`,
           },
@@ -422,7 +422,7 @@ export async function DELETE(request: NextRequest) {
     // Log analytics event
     await prismadb.analyticsEvent.create({
       data: {
-        userId: authResult.user.id,
+        userId: (authResult.user as any).id,
         eventType: "dataset_deleted",
         metadata: JSON.stringify({
           datasetId: id,
@@ -438,7 +438,7 @@ export async function DELETE(request: NextRequest) {
       message: "Dataset deleted successfully",
       usageCount,
     });
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("[dataset DELETE]", error);
     return createErrorResponse(error);
   }

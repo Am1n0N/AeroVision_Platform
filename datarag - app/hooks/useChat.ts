@@ -1,83 +1,26 @@
 // hooks/useChat.ts — Robust streaming + settings-aware sessions + live settings sync
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
+import type {
+  ChatMessage,
+  ChatSession,
+  SessionDetail,
+  SourceReference,
+  UserSettings
+} from '@/types/chat';
+import type { UseChatOptions } from '@/types/ui';
+
+// Re-export types for backward compatibility
+export type { UserSettings } from '@/types/chat';
 
 /* ===============================
    Shared Types
 ================================= */
 
-interface ChatSession {
-  id: string;
-  title: string;
-  lastMessageAt: string;
-  messageCount: number;
-  isPinned: boolean;
-  isArchived: boolean;
-  modelKey: string;
-  createdAt: string;
-}
-
-export interface SourceReference {
-  id: string;
-  type: 'database' | 'document' | 'knowledge_base' | 'conversation' | 'similar_chat';
-  title: string;
-  section?: string;
-  pageNumber?: number;
-  snippet: string;
-  relevanceScore?: number;
-  metadata?: Record<string, unknown>;
-  url?: string;
-  timestamp?: string;
-}
-
-export interface ChatMessage {
-  id: string;
-  content: string;
-  role: 'USER' | 'ASSISTANT' | 'SYSTEM';
-  createdAt: string;
-  modelUsed?: string;
-  executionTime?: number;
-  dbQueryUsed?: boolean;
-  contextSources?: string;
-  sources?: SourceReference[];
-  thinking?: string;     // extracted reasoning, never rendered inline
-  isStreaming?: boolean; // UI hint while server is still streaming
-}
-
-interface SessionDetail {
-  id: string;
-  title: string;
-  chatMessages: ChatMessage[];
-  modelKey: string;
-  useDatabase: boolean;
-  useKnowledgeBase: boolean;
-  temperature: number;
-  isPinned: boolean;
-  isArchived: boolean;
-}
-
-interface UseChatOptions {
-  onError?: (error: Error) => void;
-  onSessionCreated?: (sessionId: string) => void;
-}
 
 /* ===============================
    User Settings
 ================================= */
 
-export interface UserSettings {
-  defaultModel: string;
-  defaultTemperature: number;
-  useDatabase: boolean;
-  useKnowledgeBase: boolean;
-  theme: "light" | "dark" | "system";
-  sidebarCollapsed: boolean;
-  showTokenCount: boolean;
-  showExecutionTime: boolean;
-  showSourceReferences: boolean;
-  maxContextLength: number;
-  rerankingThreshold: number;
-  enableReranking: boolean;
-}
 
 const DEFAULT_USER_SETTINGS: UserSettings = {
   defaultModel: "openai/gpt-oss-20b",
@@ -168,13 +111,13 @@ export const useUserSettings = () => {
    Models (unchanged)
 ================================= */
 
-let modelsCache: unknown[] | null = null;
+let modelsCache: any[] | null = null;
 let modelsFetchedAt = 0;
-let modelsInFlight: Promise<unknown[]> | null = null;
+let modelsInFlight: Promise<any[]> | null = null;
 const MODELS_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 export const useModels = () => {
-  const [models, setModels] = useState<unknown[]>(modelsCache ?? []);
+  const [models, setModels] = useState<any[]>(modelsCache ?? []);
   const [isLoading, setIsLoading] = useState(false);
 
   const fetchModels = useCallback(async (opts?: { force?: boolean }) => {
@@ -449,7 +392,7 @@ export const useChat = (options: UseChatOptions = {}) => {
       const existingId = currentSession?.id?.trim() ? currentSession.id : undefined;
       const effectiveSessionId = sessionId ?? existingId ?? lastSessionIdRef.current ?? undefined;
 
-      const body: unknown = {
+      const body: any = {
         messages: [{ role: 'user', content: message.trim() }],
         sessionId: effectiveSessionId,
         model: selectedModel,
@@ -484,7 +427,6 @@ export const useChat = (options: UseChatOptions = {}) => {
       const headerSources = parseSourceReferences(res);
 
       if (isNewSession && responseSessionId) {
-        options?.onSessionCreated; // noop to avoid TS unused param; we use the one from hook options
         onSessionCreated?.(responseSessionId);
         await fetchSessions(false, true);
       }
@@ -828,7 +770,7 @@ export const useChat = (options: UseChatOptions = {}) => {
 
       // Persist to backend if session exists
       if (currentSession.id) {
-        updateSession(currentSession.id, updates as unknown).catch(() => {
+        updateSession(currentSession.id, updates as any).catch(() => {
           /* non-fatal */
         });
       }

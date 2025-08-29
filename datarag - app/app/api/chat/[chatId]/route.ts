@@ -11,9 +11,9 @@ import {
   createDocumentAgent,
   handleAuthAndRateLimit,
   createErrorResponse,
-  validateDocumentChatRequest,
-  type AgentConfig,
+  validateDocumentChatRequest
 } from "@/lib/agent";
+import { type AgentConfig } from "@/types";
 
 import prismadb from "@/lib/prismadb";
 
@@ -81,8 +81,8 @@ export async function POST(
     const { user } = authResult;
     logWithContext("info", "Authentication successful", {
       requestId,
-      userId: user.id,
-      userEmail: user.email,
+      userId: (user as any).id,
+      userEmail: (user as any).email,
     });
 
     // Parse body
@@ -98,7 +98,7 @@ export async function POST(
       logWithContext("error", "Invalid JSON body", {
         requestId,
         error:
-          parseError instanceof Error ? parseError.message : "Unknown parse error",
+          parseError instanceof Error ? parseError.message : "any parse error",
       });
       return NextResponse.json(
         { error: "Invalid JSON in request body" },
@@ -132,7 +132,7 @@ export async function POST(
           create: {
             content: prompt,
             role: "USER",
-            userId: user.id,
+            userId: (user as any).id,
           },
         },
       },
@@ -162,7 +162,7 @@ export async function POST(
     const recentMessages = document.messages
       .slice(0, 10)
       .reverse()
-      .map((m) => `${m.role}: ${m.content}`)
+      .map((m: any) => `${m.role}: ${m.content}`)
       .join("\n");
 
     const additionalContext = `
@@ -205,8 +205,8 @@ ${recentMessages}
       stream = await agent.generateStreamingResponse(
         prompt,
         {
-          userId: user.id,
-          userName: `${authResult.user.firstName || ""} ${authResult.user.lastName || ""}`.trim(),
+          userId: (user as any).id,
+          userName: `${(authResult.user as any).firstName || ""} ${(authResult.user as any).lastName || ""}`.trim(),
           sessionId: params.chatId,
           documentId: params.chatId,
         },
@@ -243,7 +243,7 @@ ${recentMessages}
             data: {
               content: aiText,
               role: "SYSTEM", // Change to "ASSISTANT" if that's your DB enum/UI convention
-              userId: user.id, // Associate to current user; make nullable if schema requires
+              userId: (user as any).id, // Associate to current user; make nullable if schema requires
               documentId: params.chatId,
             },
           });
@@ -318,7 +318,7 @@ export async function GET(
       });
       return NextResponse.json({ error: "Document not found" }, { status: 404 });
     }
-    const formattedMessages = document.messages.map((msg) => ({
+    const formattedMessages = document.messages.map((msg: any) => ({
       id: msg.id,
       role: msg.role,
       content: msg.content,
@@ -346,8 +346,8 @@ export async function GET(
       messages: formattedMessages,
       conversation_stats: {
         total_messages: document.messages.length,
-        user_messages: document.messages.filter((m) => m.role === "USER").length,
-        system_messages: document.messages.filter((m) => m.role === "SYSTEM").length,
+        user_messages: document.messages.filter((m: any) => m.role === "USER").length,
+        system_messages: document.messages.filter((m: any) => m.role === "SYSTEM").length,
         last_activity: document.messages[0]?.createdAt.toISOString(),
       },
       agent_info: {
@@ -372,7 +372,7 @@ export async function GET(
       error:
         error instanceof Error
           ? { name: error.name, message: error.message, stack: error.stack }
-          : "Unknown error",
+          : "any error",
     });
     return createErrorResponse(error);
   }
@@ -403,14 +403,14 @@ export async function DELETE(
     const { user  } = authResult;
 
     const document = await prismadb.document.findFirst({
-      where: { id: params.chatId, userId: user.id },
+      where: { id: params.chatId, userId: (user as any).id },
     });
 
     if (!document) {
       logWithContext("warn", "DELETE: document not found or access denied", {
         requestId,
         chatId: params.chatId,
-        userId: user.id,
+        userId: (user as any).id,
       });
       return NextResponse.json(
         { error: "Document not found or access denied" },
@@ -436,7 +436,7 @@ export async function DELETE(
       message: "Document conversation cleared successfully",
       document_id: params.chatId,
       messages_deleted: deletedMessages.count,
-      user_id: user.id,
+      user_id: (user as any).id,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -445,7 +445,7 @@ export async function DELETE(
       error:
         error instanceof Error
           ? { name: error.name, message: error.message, stack: error.stack }
-          : "Unknown error",
+          : "any error",
     });
     return createErrorResponse(error);
   }

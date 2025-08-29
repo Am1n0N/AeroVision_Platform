@@ -2,15 +2,16 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
-
+import Link from "next/link";
 pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
 type PdfThumbnailProps = {
+  id: string;
   pdfUrl: string | null;
   initialPage?: number;
 };
 
-const PdfThumbnail = ({ pdfUrl, initialPage = 1 }: PdfThumbnailProps) => {
+const PdfThumbnail = ({ id, pdfUrl, initialPage = 1 }: PdfThumbnailProps) => {
   const [numPages, setNumPages] = useState<number>(0);
   const [pageNumber, setPageNumber] = useState<number>(initialPage);
   const [thumbnailWidth, setThumbnailWidth] = useState<number>(300);
@@ -82,20 +83,21 @@ const PdfThumbnail = ({ pdfUrl, initialPage = 1 }: PdfThumbnailProps) => {
           {numPages ? `of ${numPages}` : ""}
         </span>
       </div>
-
-      <Document
-        file={pdfUrl}
-        onLoadSuccess={onDocumentLoadSuccess}
-        loading={<div>Loading PDF…</div>}
-        error={<div>An error occurred!</div>}
-      >
-        <Page
-          pageNumber={pageNumber}
-          renderTextLayer={false}
-          renderAnnotationLayer={false}
-          width={thumbnailWidth}
-        />
-      </Document>
+      <Link href={`/chat/${id}`}>
+        <Document
+          file={pdfUrl}
+          onLoadSuccess={onDocumentLoadSuccess}
+          loading={<div>Loading PDF…</div>}
+          error={<div>An error occurred!</div>}
+        >
+          <Page
+            pageNumber={pageNumber}
+            renderTextLayer={false}
+            renderAnnotationLayer={false}
+            width={thumbnailWidth}
+          />
+        </Document>
+      </Link>
     </div>
   );
 };

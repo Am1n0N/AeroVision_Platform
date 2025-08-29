@@ -124,8 +124,8 @@ const DatabaseQueryInterface = () => {
       const rows = Array.isArray(json.rows)
         ? json.rows
         : Array.isArray(json.data)
-        ? json.data
-        : [];
+          ? json.data
+          : [];
 
       if (json.success && rows.length >= 0) {
         setResult({
@@ -164,22 +164,20 @@ const DatabaseQueryInterface = () => {
         <div className="bg-gray-100 dark:bg-neutral-800 p-1 rounded-lg">
           <button
             onClick={() => setMode("natural")}
-            className={`px-4 py-2 rounded-md transition-colors ${
-              mode === "natural"
-                ? "bg-white dark:bg-neutral-950 shadow text-gray-900 dark:text-gray-100"
-                : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
-            }`}
+            className={`px-4 py-2 rounded-md transition-colors ${mode === "natural"
+              ? "bg-white dark:bg-neutral-950 shadow text-gray-900 dark:text-gray-100"
+              : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
+              }`}
           >
             <Search className="w-4 h-4 inline mr-2" />
             Natural Language
           </button>
           <button
             onClick={() => setMode("sql")}
-            className={`px-4 py-2 rounded-md transition-colors ${
-              mode === "sql"
-                ? "bg-white dark:bg-neutral-950 shadow text-gray-900 dark:text-gray-100"
-                : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
-            }`}
+            className={`px-4 py-2 rounded-md transition-colors ${mode === "sql"
+              ? "bg-white dark:bg-neutral-950 shadow text-gray-900 dark:text-gray-100"
+              : "text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200"
+              }`}
           >
             <Code className="w-4 h-4 inline mr-2" />
             Direct SQL
@@ -361,7 +359,7 @@ const DatabaseQueryInterface = () => {
           {/* Markdown answer/summary */}
           {result.answer && (
             <div className="prose prose-sm dark:prose-invert max-w-none mb-4">
-              <Streamdown markdown={result.answer} />
+              <Streamdown>{result.answer}</Streamdown>
             </div>
           )}
 
@@ -369,7 +367,10 @@ const DatabaseQueryInterface = () => {
           {Array.isArray(result.data) && result.data.length > 0 && (
             <div className="overflow-auto border border-gray-200 dark:border-neutral-800 rounded-md">
               {(() => {
-                const cols = Object.keys(result.data[0]).slice(0, 50);
+                const firstRow = result.data[0];
+                const cols = typeof firstRow === 'object' && firstRow !== null && !Array.isArray(firstRow)
+                  ? Object.keys(firstRow as Record<string, unknown>).slice(0, 50)
+                  : [];
                 return (
                   <table className="min-w-full text-sm">
                     <thead className="bg-gray-100 dark:bg-neutral-900">
@@ -395,9 +396,11 @@ const DatabaseQueryInterface = () => {
                               key={c}
                               className="px-3 py-2 text-gray-800 dark:text-gray-200 whitespace-nowrap"
                             >
-                              {row[c] === null || row[c] === undefined
-                                ? "—"
-                                : String(row[c])}
+                              {typeof row === "object" && row !== null && c in row
+                                ? (row as Record<string, unknown>)[c] === null || (row as Record<string, unknown>)[c] === undefined
+                                  ? "—"
+                                  : String((row as Record<string, unknown>)[c])
+                                : "—"}
                             </td>
                           ))}
                         </tr>

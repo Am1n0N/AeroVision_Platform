@@ -27,7 +27,7 @@ const PatchSchema = z
     })
     .strict();
 
-function err(status: number, message: string, details?: unknown) {
+function err(status: number, message: string, details?: any) {
     return NextResponse.json({ error: message, details }, { status });
 }
 

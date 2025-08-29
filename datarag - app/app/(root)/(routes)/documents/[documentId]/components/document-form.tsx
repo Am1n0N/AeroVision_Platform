@@ -94,7 +94,7 @@ const extractTextFromPDF = async (file: File): Promise<string> => {
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const textContent = await page.getTextContent();
-      const pageText = (textContent.items as unknown[]).map((it) => it.str).join(" ");
+      const pageText = (textContent.items as { str?: string }[]).map((it) => it.str ?? "").join(" ");
       fullText += pageText + "\n";
     }
     return fullText.trim();
@@ -130,10 +130,10 @@ export const DocumentForm = ({ initialData, categories }: DocumentIdPageProps) =
     defaultValues: initialData
       ? {
           title: initialData.title ?? "",
-          description: (initialData as unknown).description ?? "",
-          categoryId: (initialData as unknown).categoryId ?? "",
+          description: (initialData as any).description ?? "",
+          categoryId: (initialData as any).categoryId ?? "",
           file: null,
-          fileUrl: (initialData as unknown).fileUrl ?? "",
+          fileUrl: (initialData as any).fileUrl ?? "",
           addToKnowledgeBase: true
         }
       : {
@@ -257,7 +257,7 @@ export const DocumentForm = ({ initialData, categories }: DocumentIdPageProps) =
 
         setProcessingDetails("Successfully chunked and added to knowledge base!");
       }
-    } catch (error: unknown) {
+    } catch (error: any) {
       const msg = error?.response?.data?.error || error?.message || "Failed to add to knowledge base";
       console.error("Error adding to knowledge base:", msg);
       throw new Error(`Knowledge base error: ${msg}`);
@@ -373,7 +373,7 @@ export const DocumentForm = ({ initialData, categories }: DocumentIdPageProps) =
         router.push("/");
       }, 2000);
 
-    } catch (error: unknown) {
+    } catch (error: any) {
       console.error("Error in form submission:", error);
       setCurrentStage(ProcessingStage.ERROR);
       const errorMessage = error?.response?.data?.error || error?.message || "An unexpected error occurred";

@@ -109,7 +109,7 @@ export async function POST(req: Request) {
     await memoryManager.ensureEmbeddingModelsAvailable();
 
     // Start database transaction for consistency
-    const result = await prismadb.$transaction(async (tx) => {
+    const result = await prismadb.$transaction(async (tx: any) => {
       // Normalize and process tags
       const tagNames = normalizeTags(data.tags ?? data.tagsCsv);
       let tagConnections: { id: string }[] = [];
@@ -120,7 +120,7 @@ export async function POST(req: Request) {
           select: { id: true, name: true },
         });
 
-        const existingTagMap = new Map(existingTags.map((t) => [t.name, t.id]));
+        const existingTagMap = new Map(existingTags.map((t: any) => [t.name, t.id]));
         const missingTags = tagNames.filter((n) => !existingTagMap.has(n));
 
         if (missingTags.length > 0) {
@@ -138,10 +138,10 @@ export async function POST(req: Request) {
             tagConnections = [...existingTags, ...newTags].map((t) => ({ id: t.id }));
           } catch (tagError) {
             console.error("Error creating tags:", tagError);
-            tagConnections = existingTags.map((t) => ({ id: t.id }));
+            tagConnections = existingTags.map((t: any) => ({ id: t.id }));
           }
         } else {
-          tagConnections = existingTags.map((t) => ({ id: t.id }));
+          tagConnections = existingTags.map((t: any) => ({ id: t.id }));
         }
       }
 
@@ -195,7 +195,7 @@ export async function POST(req: Request) {
       userId: user.id,
       title: parse.data.title,
       category: parse.data.category ?? null,
-      tags: (result.tags || []).map((t) => t.name),
+      tags: (result.tags || []).map((t: any) => t.name),
       sourceUrl: parse.data.sourceUrl,
       // namespace doc id for vector store – ties all chunks to this entry
       documentId: parse.data.documentId || `kb:${result.id}`,
