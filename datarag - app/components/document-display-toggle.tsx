@@ -1,7 +1,7 @@
 "use client";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect } from "react";
-import { Eye, EyeOff, List, Box, ListIcon} from "lucide-react";
+import { Box, ListIcon} from "lucide-react";
 import queryString from "query-string";
 
 export const DocumentDisplayToggle = () => {

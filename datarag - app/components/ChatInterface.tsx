@@ -1,4 +1,7 @@
-// components/ChatInterface.tsx - Enhanced with source references display
+'use client';
+
+// components/ChatInterface.tsx - Enhanced with source references display (implemented)
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   MessageCircle,
@@ -10,24 +13,18 @@ import {
   Loader2,
   Database,
   Book,
-  Clock,
   MoreVertical,
   Search,
   X,
-  Edit3,
   Trash2,
-  ExternalLink,
   FileText,
   MessageSquare,
   Zap,
-  ChevronDown,
-  ChevronUp,
-  Copy,
-  Check
 } from 'lucide-react';
 import MessageRenderer from './MessageRenderer';
 import SettingsPanel from "@/components/SettingsPanel";
 import { useUserSettings } from "@/hooks/useChat";
+
 // Enhanced message type to include sources
 interface EnhancedChatMessage {
   id: string;
@@ -49,14 +46,14 @@ interface SourceReference {
   pageNumber?: number;
   snippet: string;
   relevanceScore?: number;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   url?: string;
   timestamp?: string;
 }
 
 interface ChatInterfaceProps {
-  chat: any;
-  settings: any;
+  chat: unknown;     // keeping as any to match existing app types
+  settings: unknown; // keeping as any to match existing app types
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
@@ -66,7 +63,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
   const [showArchived, setShowArchived] = useState(false);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [showDropdown, setShowDropdown] = useState<string | null>(null);
+
+  // Implemented: track which message IDs are expanded for sources
   const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
+  // Implemented: feedback for copied snippet
   const [copiedText, setCopiedText] = useState<string>('');
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -82,7 +82,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
     setSidebarCollapsed(settings.sidebarCollapsed || false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
 
   // Refs for DOM elements
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -187,44 +186,50 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
     return date.toLocaleDateString();
   }, []);
 
-  const filteredSessions = React.useMemo(() =>
-    sessions.filter((session: any) =>
-      session.title.toLowerCase().includes(searchTerm.toLowerCase())
-    ), [sessions, searchTerm]);
+  const filteredSessions = React.useMemo(
+    () =>
+      sessions.filter((session: unknown) =>
+        String(session.title || '').toLowerCase().includes(searchTerm.toLowerCase())
+      ),
+    [sessions, searchTerm]
+  );
 
-  const handleTitleEdit = useCallback(async (sessionId: string, newTitle: string) => {
-    if (newTitle.trim()) {
-      await updateSession(sessionId, { title: newTitle.trim() });
-    }
-    setEditingTitle(null);
-  }, [updateSession]);
+  const handleTitleEdit = useCallback(
+    async (sessionId: string, newTitle: string) => {
+      if (newTitle.trim()) {
+        await updateSession(sessionId, { title: newTitle.trim() });
+      }
+      setEditingTitle(null);
+    },
+    [updateSession]
+  );
 
   const handleArchiveToggle = useCallback((newArchiveState: boolean) => {
     setShowArchived(newArchiveState);
   }, []);
 
-  const toggleSourceExpansion = (messageId: string) => {
+  // Implemented: toggle per-message sources expansion
+  const toggleSourceExpansion = useCallback((messageId: string) => {
     setExpandedSources(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(messageId)) {
-        newSet.delete(messageId);
-      } else {
-        newSet.add(messageId);
-      }
-      return newSet;
+      const next = new Set(prev);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      return next;
     });
-  };
+  }, []);
 
-  const copyToClipboard = async (text: string) => {
+  // Implemented: clipboard helper with UI feedback
+  const copyToClipboard = useCallback(async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedText(text);
-      setTimeout(() => setCopiedText(''), 2000);
+      setTimeout(() => setCopiedText(''), 1500);
     } catch (err) {
       console.error('Failed to copy text: ', err);
     }
-  };
+  }, []);
 
+  // Implemented: icon per source type
   const getSourceIcon = (type: SourceReference['type']) => {
     switch (type) {
       case 'database':
@@ -242,6 +247,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
     }
   };
 
+  // Implemented: human-readable label per source type
   const getSourceTypeLabel = (type: SourceReference['type']) => {
     switch (type) {
       case 'database':
@@ -259,15 +265,86 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
     }
   };
 
-  // Component for displaying source references - now integrated into MessageRenderer
-  // This component is kept for backward compatibility but not used
-  const SourceReferences = ({ sources, messageId }: { sources: SourceReference[], messageId: string }) => {
-    // This component has been replaced by the MessageRenderer component
-    return null;
+  // Implemented: SourceReferences component
+  const SourceReferences = ({ sources, messageId }: { sources: SourceReference[]; messageId: string }) => {
+    if (!sources || sources.length === 0) return null;
+
+    const isOpen = expandedSources.has(messageId);
+
+    return (
+      <div className="mt-2 ml-10">
+        <button
+          onClick={() => toggleSourceExpansion(messageId)}
+          className="text-xs rounded px-2 py-1 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-neutral-800 transition-colors"
+          aria-expanded={isOpen}
+        >
+          {isOpen ? `Hide sources (${sources.length})` : `Show sources (${sources.length})`}
+        </button>
+
+        {isOpen && (
+          <div className="mt-2 space-y-2">
+            {sources.map((src) => (
+              <div
+                key={src.id}
+                className="rounded-lg border border-gray-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 p-3"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2 min-w-0">
+                    <div className="mt-0.5">{getSourceIcon(src.type)}</div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
+                        {src.title}
+                      </div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        {getSourceTypeLabel(src.type)}
+                        {src.section ? ` • ${src.section}` : ''}
+                        {typeof src.pageNumber === 'number' ? ` • p.${src.pageNumber}` : ''}
+                        {src.timestamp ? ` • ${new Date(src.timestamp).toLocaleString()}` : ''}
+                        {typeof src.relevanceScore === 'number' ? ` • score ${src.relevanceScore.toFixed(2)}` : ''}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex-shrink-0 flex items-center gap-2">
+                    {src.url && (
+                      <a
+                        href={src.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs px-2 py-1 rounded bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-neutral-700"
+                        title="Open source"
+                      >
+                        Open
+                      </a>
+                    )}
+                    <button
+                      onClick={() => copyToClipboard(src.snippet)}
+                      className="text-xs px-2 py-1 rounded border border-gray-300 dark:border-neutral-700 hover:bg-gray-50 dark:hover:bg-neutral-800 text-gray-700 dark:text-gray-200"
+                      title="Copy snippet"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-2">
+                  <pre className="whitespace-pre-wrap break-words text-xs text-gray-800 dark:text-gray-300 bg-gray-50 dark:bg-neutral-900 border border-gray-200 dark:border-neutral-800 rounded p-2">
+                    {src.snippet}
+                  </pre>
+                  {copiedText === src.snippet && (
+                    <div className="mt-1 text-[11px] text-green-600 dark:text-green-400">Copied!</div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const SessionDropdown = ({ sessionId }: { sessionId: string }) => {
-    const session = sessions.find((s: any) => s.id === sessionId);
+    const session = sessions.find((s: unknown) => s.id === sessionId);
     if (!session) return null;
 
     return (
@@ -349,6 +426,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                   <button
                     onClick={() => setSearchTerm('')}
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+                    aria-label="Clear search"
                   >
                     <X size={16} />
                   </button>
@@ -389,7 +467,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                 </div>
               ) : (
                 <>
-                  {filteredSessions.map((session: any) => (
+                  {filteredSessions.map((session: unknown) => (
                     <div
                       key={session.id}
                       className={`group relative p-3 rounded-lg cursor-pointer transition-colors mb-1 ${currentSession?.id === session.id
@@ -408,7 +486,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                               defaultValue={session.title}
                               className="w-full text-sm font-medium bg-white dark:bg-neutral-900 text-gray-900 dark:text-gray-100 border border-gray-300 dark:border-neutral-700 rounded px-2 py-1 outline-none focus:ring-2 focus:ring-gray-500"
                               onBlur={(e) => handleTitleEdit(session.id, e.target.value)}
-                              onKeyPress={(e) => {
+                              onKeyDown={(e) => {
                                 if (e.key === 'Enter') {
                                   handleTitleEdit(session.id, (e.target as HTMLInputElement).value);
                                 }
@@ -437,6 +515,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                               setShowDropdown(showDropdown === session.id ? null : session.id);
                             }}
                             className="p-1 hover:bg-gray-200 dark:hover:bg-neutral-800 rounded text-gray-700 dark:text-gray-200"
+                            aria-haspopup="menu"
+                            aria-expanded={showDropdown === session.id}
                           >
                             <MoreVertical size={14} />
                           </button>
@@ -564,10 +644,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
             {/* Messages */}
             <div className="flex-1 overflow-y-auto max-w-screen-2xl p-4 space-y-4 bg-gray-50 dark:bg-black">
               {currentSession.chatMessages.map((message: EnhancedChatMessage) => (
-                <MessageRenderer
-                  key={message.id}
-                  message={message}
-                />
+                <div key={message.id}>
+                  <MessageRenderer message={message} />
+
+                  {/* Implemented: Optional per-message Sources UI */}
+                  {Array.isArray(message.sources) && message.sources.length > 0 && (
+                    <SourceReferences sources={message.sources} messageId={message.id} />
+                  )}
+                </div>
               ))}
 
               {isLoading && (
@@ -593,7 +677,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
                       ref={textareaRef}
                       value={inputMessage}
                       onChange={(e) => setInputMessage(e.target.value)}
-                      onKeyPress={handleKeyPress}
+                      onKeyDown={handleKeyPress}
                       placeholder="Type your message..."
                       className="w-full px-4 py-3 border border-gray-300 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 resize-none focus:ring-2 focus:ring-gray-500 focus:border-transparent max-h-32"
                       rows={1}
@@ -673,6 +757,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
           </div>
         )}
       </div>
+
       <SettingsPanel open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </div>
   );

@@ -15,7 +15,7 @@ const ChatPage = () => {
     onError: (error) => {
       toast.error(`Error: ${error.message}`);
     },
-    onSessionCreated: (sessionId) => {
+    onSessionCreated: () => {
       toast.success('New chat session created!');
     },
   });

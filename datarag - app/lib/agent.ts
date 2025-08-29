@@ -1,5 +1,3 @@
-import { config } from './../middleware';
-
 import { ChatGroq } from "@langchain/groq";
 import { InferenceClient } from "@huggingface/inference";
 
@@ -77,12 +75,12 @@ export interface AgentContext {
   userName?: string;
   sessionId?: string;
   documentId?: string;
-  chatKey?: any;
+  chatKey?: unknown;
 }
 
 export interface DatabaseQueryResult {
   success: boolean;
-  data?: any[];
+  data?: unknown[];
   sqlQuery?: string;
   error?: string;
   summary?: string;
@@ -130,7 +128,7 @@ export interface SourceReference {
   pageNumber?: number;
   snippet: string;
   relevanceScore?: number;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   url?: string;
   timestamp?: string;
 }
@@ -347,9 +345,9 @@ class HuggingFaceEmbeddings {
           { model: this.model, inputs },
           { wait_for_model: this.waitForModel }
         );
-        const vectors = this.to2D(out as any, texts.length);
+        const vectors = this.to2D(out as unknown, texts.length);
         return this.normalize ? vectors.map(this.l2norm) : vectors;
-      } catch (e: any) {
+      } catch (e: unknown) {
         const status = e?.status ?? e?.cause?.status;
         if ((status === 429 || status === 503) && attempt < this.maxRetries) {
           await new Promise(r => setTimeout(r, 500 * (attempt + 1) ** 2));
@@ -363,7 +361,7 @@ class HuggingFaceEmbeddings {
   }
 
   /** Coerce output into [batch][dim], mean-pooling when token vectors are returned. */
-  private to2D(output: any, count: number): number[][] {
+  private to2D(output: unknown, count: number): number[][] {
     if (!Array.isArray(output)) throw new Error("Unexpected embedding response format.");
 
     // [dim]
@@ -462,14 +460,14 @@ class MemoryManager {
       .replace(/[–—]/g, "-")
       .trim();
   }
-  private classify(content: string): "title" | "paragraph" | "list" | "table" | "unknown" {
+  private classify(content: string): "title" | "paragraph" | "list" | "table" | "any" {
     const t = content.trim();
     if (t.length < 100 && /^[A-Z][^.!?]*$/.test(t)) return "title";
     if (/^[\s]*[-•*]\s/.test(t) || /^\d+\.\s/.test(t)) return "list";
     if (/\|\s*\w+\s*\|/.test(t) || t.split("\t").length > 2) return "table";
-    return t.length > 50 ? "paragraph" : "unknown";
+    return t.length > 50 ? "paragraph" : "any";
   }
-  private makeDoc(content: string, metadata: Record<string, any>) {
+  private makeDoc(content: string, metadata: Record<string, unknown>) {
     const pageContent = this.preprocess(content);
     return new Document({
       pageContent,
@@ -519,7 +517,7 @@ class MemoryManager {
       return Number(process.env.PINECONE_DIMENSION);
     }
 
-    return null; // unknown (we’ll still validate via a probe)
+    return null; // any (we’ll still validate via a probe)
   }
 
   private async getModelDimension(modelId: string): Promise<number> {
@@ -649,7 +647,7 @@ class MemoryManager {
       useReranking,
       modelKey,
       threshold,
-    }: { topK?: number; filters?: Record<string, any>; useReranking?: boolean; modelKey?: ModelKey; threshold?: number } = {}
+    }: { topK?: number; filters?: Record<string, unknown>; useReranking?: boolean; modelKey?: ModelKey; threshold?: number } = {}
   ) {
     const store = await this.store(namespace);
     const filter = this.cfg.enableMetadataFiltering ? filters : undefined;
@@ -657,17 +655,17 @@ class MemoryManager {
     const scored = await store.similaritySearchWithScore(query, k, filter);
 
     const docs = scored.map(([doc, score]) => {
-      (doc as any).metadata = { ...(doc as any).metadata, searchScore: score };
+      (doc as unknown).metadata = { ...(doc as unknown).metadata, searchScore: score };
       return doc;
     });
 
     if (useReranking && docs.length > 1) {
-      const rer = await this.rerankDocuments(query, docs as any, modelKey, threshold);
+      const rer = await this.rerankDocuments(query, docs as unknown, modelKey, threshold);
       return { documents: rer.slice(0, topK).map((r) => r.document), rerankingResults: rer.slice(0, topK) };
     }
-    return { documents: docs.slice(0, topK) as any, rerankingResults: [] as RerankingResult[] };
+    return { documents: docs.slice(0, topK) as unknown, rerankingResults: [] as RerankingResult[] };
   }
-  knowledgeBaseSearch(query: string, topK = 5, filters?: Record<string, any>, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
+  knowledgeBaseSearch(query: string, topK = 5, filters?: Record<string, unknown>, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
     return this.searchCore(MemoryManager.NS_KB, query, { topK, filters, useReranking, modelKey, threshold });
   }
   vectorSearch(query: string, documentNamespace: string, filterUserMessages: boolean, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
@@ -769,7 +767,7 @@ class MemoryManager {
     return res.slice(-30).reverse().join("\n");
   }
   /* ---------- convenience ---------- */
-  async addToKnowledgeBase(content: string, metadata: Record<string, any> = {}) {
+  async addToKnowledgeBase(content: string, metadata: Record<string, unknown> = {}) {
     try {
       const store = await this.store(MemoryManager.NS_KB);
       await store.addDocuments([this.makeDoc(content, { ...metadata, documentId: metadata.documentId || "knowledge_base", addedAt: Date.now() })]);
@@ -863,7 +861,7 @@ class DatabaseQueryExecutor {
     return "low";
   }
 
-  private async summarize(userMsg: string, rows: any[]): Promise<string> {
+  private async summarize(userMsg: string, rows: unknown[]): Promise<string> {
     if (!rows?.length) return "";
     try {
       const m = this.model(0.2);
@@ -889,10 +887,10 @@ class DatabaseQueryExecutor {
     }
   }
 
-  private normalizeTableList(input: any): string[] {
+  private normalizeTableList(input: unknown): string[] {
     // Accept: string[], {name}, {table}, {table_name}, {TABLE_NAME}, or JSON string of the same
     const raw = typeof input === "string" ? (() => { try { return JSON.parse(input); } catch { return []; } })() : input;
-    const arr: any[] = Array.isArray(raw) ? raw : [];
+    const arr: unknown[] = Array.isArray(raw) ? raw : [];
     const names = arr.map((t) => {
       if (typeof t === "string") return t;
       if (t && typeof t === "object") {
@@ -912,12 +910,11 @@ class DatabaseQueryExecutor {
 
   private async buildToolSQL(userMessage: string): Promise<{ table: string; sql: string }> {
     // 1) tables
-    const tablesRaw: any = await listTables.invoke({ reasoning: `User asks: "${userMessage}"` });
+    const tablesRaw: unknown = await listTables.invoke({ reasoning: `User asks: "${userMessage}"` });
     const tables = this.normalizeTableList(tablesRaw);
 
     if (!tables.length) throw new Error("No tables available");
 
-    const lower = userMessage.toLowerCase();
     const tryKw = (...kws: string[]) => tables.find((t) => {
       const tl = t.toLowerCase();
       return kws.some(kw => tl.includes(kw));
@@ -930,7 +927,7 @@ class DatabaseQueryExecutor {
       tables[0];
 
     // 2) describe
-    const descRaw: any = await describeTable.invoke({ table_name: table, include_indexes: false });
+    const descRaw: unknown = await describeTable.invoke({ table_name: table, include_indexes: false });
     const desc = typeof descRaw === "string" ? descRaw : JSON.stringify(descRaw, null, 2);
 
     // 3) generate SQL
@@ -976,7 +973,7 @@ SQL Query:`;
         console.log(`[DEBUG] Generated SQL:`, sql);
       }
 
-      const execRaw: any = await executeSql.invoke({
+      const execRaw: unknown = await executeSql.invoke({
         sql_query: sql,
         explain_plan: false,
         reasoning: `Executing query for: ${userMessage}`,
@@ -1038,7 +1035,7 @@ SQL:`;
           console.log(`[DEBUG] Legacy generated SQL:`, sql);
         }
 
-        const toolRaw: any = await executeSql.invoke({
+        const toolRaw: unknown = await executeSql.invoke({
           sql_query: sql,
           explain_plan: this.withPerf,
           reasoning: `Legacy execution for: ${userMessage}`,
@@ -1055,7 +1052,7 @@ SQL:`;
           };
         }
 
-        const data = parsed.data as any[];
+        const data = parsed.data as unknown[];
         const summary = await this.summarize(userMessage, data);
 
         return {
@@ -1067,7 +1064,7 @@ SQL:`;
             ? { executionTime: Date.now() - started, rowCount: data.length, queryComplexity: this.complexity(sql) }
             : undefined,
         };
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error("Both tool and legacy paths failed:", err);
         return {
           success: false,
@@ -1086,14 +1083,18 @@ export class AIAgent {
   private cfg: Required<AgentConfig>;
   private mm?: MemoryManager;
   private debugMode: boolean;
-  private logger: (level: string, message: string, data?: any) => void;
+  private analytics: RerankingAnalytics;
+  private logger: (level: string, message: string, data?: unknown) => void;
 
   constructor(cfg: Partial<AgentConfig> = {}) {
     this.cfg = { ...DEFAULT_CONFIG, ...cfg };
     this.debugMode = process.env.AGENT_DEBUG === "true";
-    console.log("DebugMode: ",this.debugMode)
+    console.log("DebugMode: ", this.debugMode)
     initTools(this.cfg.modelKey);
-    this.logger = (level: string, message: string, data?: any) => {
+
+    this.analytics = RerankingAnalytics.getInstance();
+
+    this.logger = (level: string, message: string, data?: unknown) => {
       if (!this.debugMode && level === 'debug') return;
       const timestamp = new Date().toISOString();
       const logData = data ? JSON.stringify(data, null, 2) : '';
@@ -1149,7 +1150,7 @@ export class AIAgent {
   }
 
   /* ---------- auth ---------- */
-  async authenticate(request: Request): Promise<{ user: any; rateLimitOk: boolean }> {
+  async authenticate(request: Request): Promise<{ user: unknown; rateLimitOk: boolean }> {
     this.logger('debug', 'Authenticating request', { url: request.url });
     const start = Date.now();
 
@@ -1171,7 +1172,7 @@ export class AIAgent {
       });
 
       return { user, rateLimitOk: success };
-    } catch (error: any) {
+    } catch (error: unknown) {
       this.logger('error', 'Authentication failed', { error: error.message });
       throw error;
     }
@@ -1228,7 +1229,7 @@ export class AIAgent {
             this.logger('debug', 'Executing database query...');
             const exec = new DatabaseQueryExecutor(this.cfg.modelKey, false);
             const dbResult = await exec.executeQuery(message);
-            (ctxs as any).database = dbResult;
+            (ctxs as unknown).database = dbResult;
 
             this.logger('info', 'Database query completed', {
               success: dbResult.success,
@@ -1255,9 +1256,9 @@ export class AIAgent {
                 timestamp: new Date().toISOString(),
               };
               sources.push(sourceRef);
-              (ctxs as any).database.sourceRef = sourceRef;
+              (ctxs as unknown).database.sourceRef = sourceRef;
             }
-          } catch (e: any) {
+          } catch (e: unknown) {
             this.logger('error', 'Database query failed', { error: e.message, stack: e.stack });
           } finally {
             taskTimings.database = Date.now() - taskStart;
@@ -1294,24 +1295,24 @@ export class AIAgent {
             });
 
             if (search.documents.length > 0) {
-              const contextContent = search.documents.map((d) => d.pageContent).join("\n---\n").slice(0, 4000);
-              (ctxs as any).knowledge = contextContent;
+              const contextContent = search.documents.map((d: unknown) => d.pageContent).join("\n---\n").slice(0, 4000);
+              (ctxs as unknown).knowledge = contextContent;
 
-              search.documents.forEach((doc, index) => {
+              search.documents.forEach((doc: unknown, index: unknown) => {
                 const sourceRef: SourceReference = {
                   id: `kb-${Date.now()}-${index}`,
                   type: "knowledge_base",
-                  title: (doc as any).metadata?.title || (doc as any).metadata?.documentId || "Knowledge Base Entry",
-                  section: (doc as any).metadata?.chunkType || "Content",
-                  pageNumber: (doc as any).metadata?.pageNumber,
-                  snippet: (doc as any).pageContent.slice(0, 200) + "...",
-                  relevanceScore: (doc as any).metadata?.searchScore || 0.8,
+                  title: (doc as unknown).metadata?.title || (doc as unknown).metadata?.documentId || "Knowledge Base Entry",
+                  section: (doc as unknown).metadata?.chunkType || "Content",
+                  pageNumber: (doc as unknown).metadata?.pageNumber,
+                  snippet: (doc as unknown).pageContent.slice(0, 200) + "...",
+                  relevanceScore: (doc as unknown).metadata?.searchScore || 0.8,
                   metadata: {
-                    documentId: (doc as any).metadata?.documentId,
-                    chunkIndex: (doc as any).metadata?.chunkIndex,
-                    wordCount: (doc as any).metadata?.wordCount,
+                    documentId: (doc as unknown).metadata?.documentId,
+                    chunkIndex: (doc as unknown).metadata?.chunkIndex,
+                    wordCount: (doc as unknown).metadata?.wordCount,
                   },
-                  timestamp: (doc as any).metadata?.processingTimestamp,
+                  timestamp: (doc as unknown).metadata?.processingTimestamp,
                 };
                 sources.push(sourceRef);
                 citableSources.push(sourceRef);
@@ -1322,7 +1323,7 @@ export class AIAgent {
                 rerankingApplied = true;
               }
             }
-          } catch (e: any) {
+          } catch (e: unknown) {
             this.logger('error', 'Knowledge base search failed', { error: e.message, stack: e.stack });
           } finally {
             taskTimings.knowledgeBase = Date.now() - taskStart;
@@ -1349,15 +1350,15 @@ export class AIAgent {
                 sessionId: sessionId || "default",
               };
 
-              (ctxs as any).conversation = await this.mm!.readLatestGeneralChatHistory(gk);
+              (ctxs as unknown).conversation = await this.mm!.readLatestGeneralChatHistory(gk);
 
-              if ((ctxs as any).conversation) {
+              if ((ctxs as unknown).conversation) {
                 const sourceRef: SourceReference = {
                   id: `conv-${Date.now()}`,
                   type: "conversation",
                   title: "Current Conversation",
                   section: "Chat History",
-                  snippet: String((ctxs as any).conversation).slice(0, 200) + "...",
+                  snippet: String((ctxs as unknown).conversation).slice(0, 200) + "...",
                   relevanceScore: 0.8,
                   metadata: {
                     sessionId: gk.sessionId,
@@ -1378,25 +1379,25 @@ export class AIAgent {
               );
 
               const similarConvs = similar.documents
-                ?.filter((d: any) => d.metadata?.chatSession !== gk.sessionId)
-                .map((d) => d.pageContent)
+                ?.filter((d: unknown) => d.metadata?.chatSession !== gk.sessionId)
+                .map((d: unknown) => d.pageContent)
                 .join("\n---\n")
                 .slice(0, 1500);
 
-              (ctxs as any).similar = similarConvs || "";
+              (ctxs as unknown).similar = similarConvs || "";
 
-              similar.documents?.forEach((doc, index) => {
-                if ((doc as any).metadata?.chatSession !== gk.sessionId) {
+              similar.documents?.forEach((doc: unknown, index: unknown) => {
+                if ((doc as unknown).metadata?.chatSession !== gk.sessionId) {
                   const sourceRef: SourceReference = {
                     id: `similar-${Date.now()}-${index}`,
                     type: "similar_chat",
                     title: "Similar Conversation",
-                    section: `Session: ${(doc as any).metadata?.chatSession || "Unknown"}`,
-                    snippet: (doc as any).pageContent.slice(0, 200) + "...",
-                    relevanceScore: (doc as any).metadata?.searchScore,
+                    section: `Session: ${(doc as unknown).metadata?.chatSession || "any"}`,
+                    snippet: (doc as unknown).pageContent.slice(0, 200) + "...",
+                    relevanceScore: (doc as unknown).metadata?.searchScore,
                     metadata: {
-                      chatSession: (doc as any).metadata?.chatSession,
-                      timestamp: (doc as any).metadata?.timestamp,
+                      chatSession: (doc as unknown).metadata?.chatSession,
+                      timestamp: (doc as unknown).metadata?.timestamp,
                     },
                   };
                   sources.push(sourceRef);
@@ -1415,7 +1416,7 @@ export class AIAgent {
                 modelName: String(this.cfg.modelKey),
               };
 
-              (ctxs as any).conversation = await this.mm!.readLatestHistory(dk);
+              (ctxs as unknown).conversation = await this.mm!.readLatestHistory(dk);
 
               // Document content search - CITABLE
               const rel = await this.mm!.vectorSearch(
@@ -1428,9 +1429,9 @@ export class AIAgent {
               );
 
               if (rel.documents.length > 0) {
-                (ctxs as any).knowledge = rel.documents?.map((d: any) => d.pageContent).join("\n") || "";
+                (ctxs as unknown).knowledge = rel.documents?.map((d: unknown) => d.pageContent).join("\n") || "";
 
-                rel.documents?.forEach((doc: any, index: number) => {
+                rel.documents?.forEach((doc: unknown, index: number) => {
                   const sourceRef: SourceReference = {
                     id: `doc-${Date.now()}-${index}`,
                     type: "document",
@@ -1457,7 +1458,7 @@ export class AIAgent {
 
               // Similar document content - context only
               const sim = await this.mm!.vectorSearch(
-                (ctxs as any).conversation || "",
+                (ctxs as unknown).conversation || "",
                 documentMeta.id,
                 true,
                 this.cfg.useReranking,
@@ -1465,14 +1466,14 @@ export class AIAgent {
                 this.cfg.rerankingThreshold
               );
 
-              const simText = sim.documents?.map((d: any) => d.pageContent).join("\n") || "";
-              (ctxs as any).similar = simText;
+              const simText = sim.documents?.map((d: unknown) => d.pageContent).join("\n") || "";
+              (ctxs as unknown).similar = simText;
 
               if (sim.rerankingResults.length) {
                 allReranked.push(...sim.rerankingResults);
               }
             }
-          } catch (e: any) {
+          } catch (e: unknown) {
             this.logger('error', 'Memory operations failed', { error: e.message, stack: e.stack });
           } finally {
             taskTimings.memory = Date.now() - taskStart;
@@ -1492,7 +1493,7 @@ export class AIAgent {
     // Truncate contexts
     const truncated = this.truncateContexts(ctxs, this.cfg.maxContextLength);
 
-    if (allReranked.length) (truncated as any).rerankedResults = allReranked;
+    if (allReranked.length) (truncated as unknown).rerankedResults = allReranked;
 
     // Build system prompt
     const promptStart = Date.now();
@@ -1527,10 +1528,10 @@ export class AIAgent {
     }
 
     if (!documentMeta) {
-      if ((truncated as any).database?.success && (truncated as any).database.data?.length) {
-        const data = (truncated as any).database.data;
-        const sqlQuery = (truncated as any).database.sqlQuery;
-        const summary = String((truncated as any).database.summary || "").slice(0, 1200);
+      if ((truncated as unknown).database?.success && (truncated as unknown).database.data?.length) {
+        const data = (truncated as unknown).database.data;
+        const sqlQuery = (truncated as unknown).database.sqlQuery;
+        const summary = String((truncated as unknown).database.summary || "").slice(0, 1200);
 
         const columns = data.length > 0 ? Object.keys(data[0]) : [];
         const sampleRows = data.slice(0, 3);
@@ -1561,16 +1562,16 @@ Raw Data Available: ${JSON.stringify(data.slice(0, 10), null, 2)}`;
       }
     }
 
-    if ((truncated as any).knowledge) {
-      systemPrompt += `\n\nRELEVANT KNOWLEDGE CONTENT${rerankingApplied ? " (RERANKED)" : ""} (CITABLE WITH [#]):\n${(truncated as any).knowledge}`;
+    if ((truncated as unknown).knowledge) {
+      systemPrompt += `\n\nRELEVANT KNOWLEDGE CONTENT${rerankingApplied ? " (RERANKED)" : ""} (CITABLE WITH [#]):\n${(truncated as unknown).knowledge}`;
     }
 
-    if ((truncated as any).similar) {
-      systemPrompt += `\n\nRELATED CONTENT${rerankingApplied ? " (RERANKED)" : ""} (CONTEXT ONLY - DO NOT CITE):\n${(truncated as any).similar}`;
+    if ((truncated as unknown).similar) {
+      systemPrompt += `\n\nRELATED CONTENT${rerankingApplied ? " (RERANKED)" : ""} (CONTEXT ONLY - DO NOT CITE):\n${(truncated as unknown).similar}`;
     }
 
-    if ((truncated as any).conversation) {
-      systemPrompt += `\n\nCONVERSATION HISTORY (CONTEXT ONLY - DO NOT CITE):\n${(truncated as any).conversation}`;
+    if ((truncated as unknown).conversation) {
+      systemPrompt += `\n\nCONVERSATION HISTORY (CONTEXT ONLY - DO NOT CITE):\n${(truncated as unknown).conversation}`;
     }
 
     if (additionalContext) {
@@ -1594,6 +1595,28 @@ Raw Data Available: ${JSON.stringify(data.slice(0, 10), null, 2)}`;
       tokenCountEst: systemPrompt.length
     });
 
+    const rerankExecTime =
+      (taskTimings.knowledgeBase || 0) +
+      (taskTimings.memory || 0);
+
+    try {
+      if (rerankingApplied && allReranked.length && (opts.userName || "").trim()) {
+        await this.analytics.record(
+          opts.userName!,               // userId
+          message,                      // query
+          allReranked,                  // RerankingResult[]
+          rerankExecTime                // ms (best-effort)
+        );
+        this.logger('debug', 'Reranking analytics recorded from context builder', {
+          userId: opts.userName,
+          results: allReranked.length,
+          execMs: rerankExecTime
+        });
+      }
+    } catch (e: unknown) {
+      this.logger('warn', 'Failed to record reranking analytics (context builder)', { error: e?.message });
+    }
+
     return {
       shouldQueryDB,
       dbConfidence: dbDetection.confidence,
@@ -1607,569 +1630,594 @@ Raw Data Available: ${JSON.stringify(data.slice(0, 10), null, 2)}`;
     };
   }
 
+  // inside class AIAgent
+  async getRerankingStats(userId: string) {
+    try {
+      return await this.analytics.getUserStats(userId);
+    } catch (e: unknown) {
+      this.logger('warn', 'Failed to read reranking stats', { error: e?.message });
+      return null;
+    }
+  }
+
   /* ---------- truncation ---------- */
-  private truncateContexts(contexts: any, maxLength: number) {
-    this.logger('debug', 'Starting context truncation', { maxLength });
+  private truncateContexts(contexts: unknown, maxLength: number) {
+  this.logger('debug', 'Starting context truncation', { maxLength });
 
-    const t = { ...contexts };
-    let total = 0;
+  const t = { ...contexts };
+  let total = 0;
 
-    Object.entries(t).forEach(([_key, value]: [string, any]) => {
-      if (typeof value === "string") total += value.length;
-      else if (value?.summary) total += String(value.summary).length;
-    });
+  Object.entries(t).forEach(([_key, value]: [string, unknown]) => {
+    if (typeof value === "string") total += value.length;
+    else if (value?.summary) total += String(value.summary).length;
+  });
 
-    if (total <= maxLength) return t;
+  if (total <= maxLength) return t;
 
-    const priorities = ["database", "knowledge", "conversation", "similar"] as const;
-    const target = Math.floor(maxLength * 0.9);
+  const priorities = ["database", "knowledge", "conversation", "similar"] as const;
+  const target = Math.floor(maxLength * 0.9);
 
-    for (const k of priorities) {
-      if (typeof (t as any)[k] === "string") {
-        const text = (t as any)[k] as string;
-        const allowance = Math.max(200, Math.floor(target * 0.3));
+  for (const k of priorities) {
+    if (typeof (t as unknown)[k] === "string") {
+      const text = (t as unknown)[k] as string;
+      const allowance = Math.max(200, Math.floor(target * 0.3));
 
-        if (text.length > allowance) {
-          const sentences = text.split(/[.!?]+/);
-          let acc = "";
+      if (text.length > allowance) {
+        const sentences = text.split(/[.!?]+/);
+        let acc = "";
 
-          for (const s of sentences) {
-            if ((acc + s + ".").length <= allowance) acc += s + ".";
-            else break;
-          }
-          (t as any)[k] = acc || text.slice(0, allowance);
+        for (const s of sentences) {
+          if ((acc + s + ".").length <= allowance) acc += s + ".";
+          else break;
         }
+        (t as unknown)[k] = acc || text.slice(0, allowance);
       }
     }
-    return t;
   }
+  return t;
+}
 
   /* ---------- responses ---------- */
   async generateChatResponse(
-    message: string,
-    ctx: AgentContext,
-    additionalContext?: string
-  ): Promise<EnhancedAgentResponse> {
-    const totalStart = Date.now();
-    this.logger('info', 'Generating chat response', {
-      messageLength: message.length,
-      userId: ctx.userId,
-      sessionId: ctx.sessionId,
-      hasAdditionalContext: !!additionalContext
-    });
+  message: string,
+  ctx: AgentContext,
+  additionalContext ?: string
+): Promise < EnhancedAgentResponse > {
+  const totalStart = Date.now();
+  this.logger('info', 'Generating chat response', {
+    messageLength: message.length,
+    userId: ctx.userId,
+    sessionId: ctx.sessionId,
+    hasAdditionalContext: !!additionalContext
+  });
 
-    await this.initMemory();
+  await this.initMemory();
 
-    const prep = await this.buildContextsAndPrompt({
-      message,
-      userName: ctx.userId,
-      sessionId: ctx.sessionId || uuidv4(),
-      additionalContext,
-      enableDB: true,
-    });
+  const prep = await this.buildContextsAndPrompt({
+    message,
+    userName: ctx.userId,
+    sessionId: ctx.sessionId || uuidv4(),
+    additionalContext,
+    enableDB: true,
+  });
 
-    const modelStart = Date.now();
-    const model = this.model({ purpose: "chat" });
-    const resp = await model.invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
-    const content = String(resp.content || "");
-    void modelStart; // (retain for debugging if needed)
+  const modelStart = Date.now();
+  const model = this.model({ purpose: "chat" });
+  const resp = await model.invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
+  const content = String(resp.content || "");
+  void modelStart; // (retain for debugging if needed)
 
+  const citationValidation = this.validateCitations(content, prep.citableSources);
+  this.logCitationDebug(prep, content);
+
+  const citedSources = citationValidation.citedSourceIndices.map(index => prep.citableSources[index]);
+
+  // Save to memory
+  if(this.cfg.useMemory && this.mm) {
+  const gk: GeneralChatKey = {
+    userId: ctx.userId,
+    modelName: String(this.cfg.modelKey),
+    sessionId: ctx.sessionId
+  };
+
+  await this.mm.writeToGeneralChatHistory(`User: ${message}\n`, gk);
+
+  let save = `Assistant: ${content}`;
+  if ((prep.truncated as unknown).database?.success && (prep.truncated as unknown).database.sqlQuery) {
+    save += `\n[Query: ${(prep.truncated as unknown).database.sqlQuery}]`;
+  }
+
+  await this.mm.writeToGeneralChatHistory(save, gk);
+}
+
+const totalTime = Date.now() - totalStart;
+
+return {
+  content,
+  model: toGroqModel(String(this.cfg.modelKey), { purpose: "chat" }),
+  executionTime: totalTime,
+  sources: citedSources,
+  contexts: prep.truncated,
+  metadata: {
+    sessionId: ctx.sessionId || "",
+    dbQueryDetected: prep.shouldQueryDB,
+    dbQueryConfidence: prep.dbConfidence,
+    contextSources: prep.sourceTypes,
+    rerankingApplied: prep.rerankingApplied,
+    totalContextTokens: prep.tokenCountEst + content.length,
+    sourceCount: citedSources.length,
+    sourceTypes: [...new Set(citedSources.map((s) => s.type))],
+    citationValidation,
+  },
+};
+  }
+
+validateCitations(content: string, citableSources: SourceReference[]): {
+  validCitations: number[];
+  invalidCitations: number[];
+  totalCitationCount: number;
+  citedSourceIndices: number[];
+} {
+  const citationMatches = content.match(/\[(\d+)\]/g) || [];
+  const citationNumbers = citationMatches.map(match => parseInt(match.replace(/[\[\]]/g, '')));
+
+  const validCitations: number[] = [];
+  const invalidCitations: number[] = [];
+  const citedSourceIndices: number[] = [];
+
+  citationNumbers.forEach(num => {
+    if (num >= 1 && num <= citableSources.length) {
+      validCitations.push(num);
+      citedSourceIndices.push(num - 1);
+    } else {
+      invalidCitations.push(num);
+    }
+  });
+
+  return {
+    validCitations: [...new Set(validCitations)],
+    invalidCitations: [...new Set(invalidCitations)],
+    totalCitationCount: citationNumbers.length,
+    citedSourceIndices: [...new Set(citedSourceIndices)],
+  };
+}
+
+  private logCitationDebug(prep: unknown, content: string) {
+  if (this.debugMode) {
     const citationValidation = this.validateCitations(content, prep.citableSources);
-    this.logCitationDebug(prep, content);
-
-    const citedSources = citationValidation.citedSourceIndices.map(index => prep.citableSources[index]);
-
-    // Save to memory
-    if (this.cfg.useMemory && this.mm) {
-      const gk: GeneralChatKey = {
-        userId: ctx.userId,
-        modelName: String(this.cfg.modelKey),
-        sessionId: ctx.sessionId
-      };
-
-      await this.mm.writeToGeneralChatHistory(`User: ${message}\n`, gk);
-
-      let save = `Assistant: ${content}`;
-      if ((prep.truncated as any).database?.success && (prep.truncated as any).database.sqlQuery) {
-        save += `\n[Query: ${(prep.truncated as any).database.sqlQuery}]`;
-      }
-
-      await this.mm.writeToGeneralChatHistory(save, gk);
-    }
-
-    const totalTime = Date.now() - totalStart;
-
-    return {
-      content,
-      model: toGroqModel(String(this.cfg.modelKey), { purpose: "chat" }),
-      executionTime: totalTime,
-      sources: citedSources,
-      contexts: prep.truncated,
-      metadata: {
-        sessionId: ctx.sessionId || "",
-        dbQueryDetected: prep.shouldQueryDB,
-        dbQueryConfidence: prep.dbConfidence,
-        contextSources: prep.sourceTypes,
-        rerankingApplied: prep.rerankingApplied,
-        totalContextTokens: prep.tokenCountEst + content.length,
-        sourceCount: citedSources.length,
-        sourceTypes: [...new Set(citedSources.map((s) => s.type))],
-        citationValidation,
-      },
+    const citedSources = citationValidation.citedSourceIndices.map((index: number) => prep.citableSources[index]);
+    const citationData = {
+      citableSourcesCount: prep.citableSources.length,
+      citedSourcesCount: citedSources.length,
+      citableSources: prep.citableSources.map((s: unknown, i: number) => ({
+        index: i + 1,
+        type: s.type,
+        title: s.title,
+        relevanceScore: s.relevanceScore
+      })),
+      citedSources: citedSources.map((s: unknown, i: number) => ({
+        index: citationValidation.citedSourceIndices[i] + 1,
+        type: s.type,
+        title: s.title,
+        relevanceScore: s.relevanceScore
+      })),
+      contentHasCitations: /\[\d+\]/.test(content),
+      extractedCitations: (content.match(/\[(\d+)\]/g) || []),
+      citationPattern: content.match(/\[\d+\]/g),
+      contextTypes: Object.keys(prep.truncated),
+      rerankingApplied: prep.rerankingApplied
     };
+    this.logger('debug', 'Citation debug information', citationData);
   }
-
-  validateCitations(content: string, citableSources: SourceReference[]): {
-    validCitations: number[];
-    invalidCitations: number[];
-    totalCitationCount: number;
-    citedSourceIndices: number[];
-  } {
-    const citationMatches = content.match(/\[(\d+)\]/g) || [];
-    const citationNumbers = citationMatches.map(match => parseInt(match.replace(/[\[\]]/g, '')));
-
-    const validCitations: number[] = [];
-    const invalidCitations: number[] = [];
-    const citedSourceIndices: number[] = [];
-
-    citationNumbers.forEach(num => {
-      if (num >= 1 && num <= citableSources.length) {
-        validCitations.push(num);
-        citedSourceIndices.push(num - 1);
-      } else {
-        invalidCitations.push(num);
-      }
-    });
-
-    return {
-      validCitations: [...new Set(validCitations)],
-      invalidCitations: [...new Set(invalidCitations)],
-      totalCitationCount: citationNumbers.length,
-      citedSourceIndices: [...new Set(citedSourceIndices)],
-    };
-  }
-
-  private logCitationDebug(prep: any, content: string) {
-    if (this.debugMode) {
-      const citationValidation = this.validateCitations(content, prep.citableSources);
-      const citedSources = citationValidation.citedSourceIndices.map((index: number) => prep.citableSources[index]);
-      const citationData = {
-        citableSourcesCount: prep.citableSources.length,
-        citedSourcesCount: citedSources.length,
-        citableSources: prep.citableSources.map((s: any, i: number) => ({
-          index: i + 1,
-          type: s.type,
-          title: s.title,
-          relevanceScore: s.relevanceScore
-        })),
-        citedSources: citedSources.map((s: any, i: number) => ({
-          index: citationValidation.citedSourceIndices[i] + 1,
-          type: s.type,
-          title: s.title,
-          relevanceScore: s.relevanceScore
-        })),
-        contentHasCitations: /\[\d+\]/.test(content),
-        extractedCitations: (content.match(/\[(\d+)\]/g) || []),
-        citationPattern: content.match(/\[\d+\]/g),
-        contextTypes: Object.keys(prep.truncated),
-        rerankingApplied: prep.rerankingApplied
-      };
-      this.logger('debug', 'Citation debug information', citationData);
-    }
-  }
+}
 
   async generateDocumentResponse(
-    message: string,
-    ctx: AgentContext,
-    documentContext?: string
-  ): Promise<EnhancedAgentResponse> {
-    const totalStart = Date.now();
-    this.logger('info', 'Generating document response', {
-      messageLength: message.length,
-      userId: ctx.userId,
-      documentId: ctx.documentId,
-      sessionId: ctx.sessionId,
-      hasDocumentContext: !!documentContext
-    });
+  message: string,
+  ctx: AgentContext,
+  documentContext ?: string
+): Promise < EnhancedAgentResponse > {
+  const totalStart = Date.now();
+  this.logger('info', 'Generating document response', {
+    messageLength: message.length,
+    userId: ctx.userId,
+    documentId: ctx.documentId,
+    sessionId: ctx.sessionId,
+    hasDocumentContext: !!documentContext
+  });
 
-    await this.initMemory();
-    if (!ctx.documentId) {
-      this.logger('error', 'Document ID missing');
-      throw new Error("Document ID required");
-    }
+  await this.initMemory();
+  if(!ctx.documentId) {
+  this.logger('error', 'Document ID missing');
+  throw new Error("Document ID required");
+}
 
-    const docLoadStart = Date.now();
-    const doc = await prismadb.document.findUnique({
-      where: { id: ctx.documentId },
-      include: { messages: true },
-    });
+const docLoadStart = Date.now();
+const doc = await prismadb.document.findUnique({
+  where: { id: ctx.documentId },
+  include: { messages: true },
+});
 
-    if (!doc) {
-      this.logger('error', 'Document not found', { documentId: ctx.documentId });
-      throw new Error("Document not found");
-    }
+if (!doc) {
+  this.logger('error', 'Document not found', { documentId: ctx.documentId });
+  throw new Error("Document not found");
+}
 
-    this.logger('info', 'Document loaded', {
-      documentId: doc.id,
-      title: doc.title,
-      messageCount: doc.messages.length,
-      loadTime: Date.now() - docLoadStart
-    });
+this.logger('info', 'Document loaded', {
+  documentId: doc.id,
+  title: doc.title,
+  messageCount: doc.messages.length,
+  loadTime: Date.now() - docLoadStart
+});
 
-    const prep = await this.buildContextsAndPrompt({
-      message,
-      userName: ctx.userId,
-      sessionId: ctx.sessionId,
-      additionalContext: documentContext,
-      documentMeta: { id: doc.id, title: doc.title, description: (doc as any).description || "" },
-      enableDB: false,
-    });
+const prep = await this.buildContextsAndPrompt({
+  message,
+  userName: ctx.userId,
+  sessionId: ctx.sessionId,
+  additionalContext: documentContext,
+  documentMeta: { id: doc.id, title: doc.title, description: (doc as unknown).description || "" },
+  enableDB: false,
+});
 
-    const modelStart = Date.now();
-    const model = this.model({ purpose: "chat" });
-    const resp = await model.invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
-    const content = String(resp.content || "");
-    void modelStart;
+const modelStart = Date.now();
+const model = this.model({ purpose: "chat" });
+const resp = await model.invoke([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
+const content = String(resp.content || "");
+void modelStart;
 
-    const citationValidation = this.validateCitations(content, prep.citableSources);
-    this.logCitationDebug(prep, content);
+const citationValidation = this.validateCitations(content, prep.citableSources);
+this.logCitationDebug(prep, content);
 
-    const citedSources = citationValidation.citedSourceIndices.map(index => prep.citableSources[index]);
+const citedSources = citationValidation.citedSourceIndices.map(index => prep.citableSources[index]);
 
-    if (this.cfg.useMemory && this.mm) {
-      const dk: DocumentKey = {
-        documentName: doc.id,
-        userId: ctx.userId,
-        modelName: String(this.cfg.modelKey)
-      };
-      await this.mm.writeToHistory(`User: ${message}\n`, dk);
-      await this.mm.writeToHistory(`System: ${content}`, dk);
-    }
+if (this.cfg.useMemory && this.mm) {
+  const dk: DocumentKey = {
+    documentName: doc.id,
+    userId: ctx.userId,
+    modelName: String(this.cfg.modelKey)
+  };
+  await this.mm.writeToHistory(`User: ${message}\n`, dk);
+  await this.mm.writeToHistory(`System: ${content}`, dk);
+}
 
-    try {
-      await prismadb.document.update({
-        where: { id: ctx.documentId },
-        data: {
-          messages: {
-            createMany: {
-              data: [
-                { content: message, role: "USER", userId: ctx.userId },
-                { content, role: "SYSTEM", userId: ctx.userId },
-              ],
-            },
-          },
+try {
+  await prismadb.document.update({
+    where: { id: ctx.documentId },
+    data: {
+      messages: {
+        createMany: {
+          data: [
+            { content: message, role: "USER", userId: ctx.userId },
+            { content, role: "SYSTEM", userId: ctx.userId },
+          ],
         },
-      });
-    } catch (e: any) {
-      this.logger('error', 'Failed to save messages to database', {
-        error: e.message,
-        documentId: ctx.documentId
-      });
-      console.warn("save messages to db failed", e);
-    }
-
-    const totalTime = Date.now() - totalStart;
-
-    return {
-      content,
-      model: toGroqModel(String(this.cfg.modelKey), { purpose: "chat" }),
-      executionTime: totalTime,
-      sources: citedSources,
-      contexts: prep.truncated,
-      metadata: {
-        sessionId: ctx.sessionId || ctx.documentId!,
-        dbQueryDetected: false,
-        dbQueryConfidence: 0,
-        contextSources: prep.sourceTypes,
-        rerankingApplied: prep.rerankingApplied,
-        totalContextTokens: prep.tokenCountEst + content.length,
-        sourceCount: citedSources.length,
-        sourceTypes: [...new Set(citedSources.map((s) => s.type))],
-        citationValidation,
       },
-    };
+    },
+  });
+} catch (e: unknown) {
+  this.logger('error', 'Failed to save messages to database', {
+    error: e.message,
+    documentId: ctx.documentId
+  });
+  console.warn("save messages to db failed", e);
+}
+
+const totalTime = Date.now() - totalStart;
+
+return {
+  content,
+  model: toGroqModel(String(this.cfg.modelKey), { purpose: "chat" }),
+  executionTime: totalTime,
+  sources: citedSources,
+  contexts: prep.truncated,
+  metadata: {
+    sessionId: ctx.sessionId || ctx.documentId!,
+    dbQueryDetected: false,
+    dbQueryConfidence: 0,
+    contextSources: prep.sourceTypes,
+    rerankingApplied: prep.rerankingApplied,
+    totalContextTokens: prep.tokenCountEst + content.length,
+    sourceCount: citedSources.length,
+    sourceTypes: [...new Set(citedSources.map((s) => s.type))],
+    citationValidation,
+  },
+};
   }
 
   /* ---------- streaming ---------- */
   async generateStreamingResponse(
-    message: string,
-    ctx: AgentContext,
-    additionalContext?: string
-  ): Promise<ReadableStream> {
-    const streamStart = Date.now();
-    this.logger('info', 'Starting streaming response generation', {
-      messageLength: message.length,
-      userId: ctx.userId,
-      sessionId: ctx.sessionId,
-      hasAdditionalContext: !!additionalContext
-    });
+  message: string,
+  ctx: AgentContext,
+  additionalContext ?: string
+): Promise < ReadableStream > {
+  const streamStart = Date.now();
+  this.logger('info', 'Starting streaming response generation', {
+    messageLength: message.length,
+    userId: ctx.userId,
+    sessionId: ctx.sessionId,
+    hasAdditionalContext: !!additionalContext
+  });
 
-    await this.initMemory();
+  await this.initMemory();
 
-    const prep = await this.buildContextsAndPrompt({
-      message,
-      userName: ctx.userId,
-      sessionId: ctx.sessionId || uuidv4(),
-      additionalContext,
-      enableDB: true,
-    });
+  const prep = await this.buildContextsAndPrompt({
+    message,
+    userName: ctx.userId,
+    sessionId: ctx.sessionId || uuidv4(),
+    additionalContext,
+    enableDB: true,
+  });
 
-    const model = this.model({ forceStreaming: true, purpose: "chat" });
-    const stream = await model.stream([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
+  const model = this.model({ forceStreaming: true, purpose: "chat" });
+  const stream = await model.stream([new SystemMessage(prep.systemPrompt), new HumanMessage(message)]);
 
-    const mm = this.mm;
-    const cfg = this.cfg;
-    const logger = this.logger;
-    const gk: GeneralChatKey = {
-      userId: ctx.userId,
-      modelName: String(this.cfg.modelKey),
-      sessionId: ctx.sessionId
-    };
+  const mm = this.mm;
+  const cfg = this.cfg;
+  const logger = this.logger;
+  const gk: GeneralChatKey = {
+    userId: ctx.userId,
+    modelName: String(this.cfg.modelKey),
+    sessionId: ctx.sessionId
+  };
 
-    if (cfg.useMemory && mm) {
-      await mm.writeToGeneralChatHistory(`User: ${message}\n`, gk);
-    }
+  if(cfg.useMemory && mm) {
+  await mm.writeToGeneralChatHistory(`User: ${message}\n`, gk);
+}
 
-    let chunkCount = 0;
-    let totalContentLength = 0;
-    const self = this; // bind for validateCitations
+let chunkCount = 0;
+let totalContentLength = 0;
 
-    return new ReadableStream({
-      async start(controller) {
-        const encoder = new TextEncoder();
-        let buffer = "";
-        const streamProcessStart = Date.now();
+return new ReadableStream({
+  async start(controller) {
+    const encoder = new TextEncoder();
+    let buffer = "";
+    const streamProcessStart = Date.now();
 
-        logger('debug', 'Starting stream processing');
+    logger('debug', 'Starting stream processing');
 
-        try {
-          for await (const chunk of stream) {
-            chunkCount++;
-            const content = (chunk as any).content || "";
+    try {
+      for await (const chunk of stream) {
+        chunkCount++;
+        const content = (chunk as unknown).content || "";
 
-            if (content) {
-              controller.enqueue(encoder.encode(content));
-              buffer += content;
-              totalContentLength += content.length;
-            }
-          }
-
-          logger('info', 'Stream processing completed successfully', {
-            totalChunks: chunkCount,
-            totalContentLength,
-            streamProcessTime: Date.now() - streamProcessStart,
-            finalBufferLength: buffer.length
-          });
-
-        } catch (err: any) {
-          logger('error', 'Stream processing failed', {
-            error: err.message,
-            stack: err.stack,
-            chunksProcessed: chunkCount,
-            contentReceived: totalContentLength
-          });
-
-          const msg = `I hit an issue: ${err.message}. Please try again.`;
-          controller.enqueue(encoder.encode(msg));
-          buffer = msg;
-        } finally {
-          controller.close();
-
-          if (buffer.trim() && cfg.useMemory && mm) {
-            let toSave = `Assistant: ${buffer.trim()}`;
-            if ((prep.truncated as any).database?.success && (prep.truncated as any).database.sqlQuery) {
-              toSave += `\n[Query: ${(prep.truncated as any).database.sqlQuery}]`;
-            }
-            if (prep.rerankingApplied) {
-              toSave += `\n[Reranking applied: ${((prep.truncated as any).rerankedResults || []).length}]`;
-            }
-            await mm.writeToGeneralChatHistory(toSave, gk);
-            logger('debug', 'Streaming response saved to memory', {
-              savedContentLength: toSave.length
-            });
-          }
-
-          if (buffer.trim()) {
-            const citationValidation = self.validateCitations(buffer, prep.citableSources);
-            logger('info', 'Final streaming response citation validation', {
-              ...citationValidation,
-              responseLength: buffer.length,
-              totalStreamTime: Date.now() - streamStart
-            });
-          }
+        if (content) {
+          controller.enqueue(encoder.encode(content));
+          buffer += content;
+          totalContentLength += content.length;
         }
-      },
-    });
+      }
+
+      logger('info', 'Stream processing completed successfully', {
+        totalChunks: chunkCount,
+        totalContentLength,
+        streamProcessTime: Date.now() - streamProcessStart,
+        finalBufferLength: buffer.length
+      });
+
+    } catch (err: unknown) {
+      logger('error', 'Stream processing failed', {
+        error: err.message,
+        stack: err.stack,
+        chunksProcessed: chunkCount,
+        contentReceived: totalContentLength
+      });
+
+      const msg = `I hit an issue: ${err.message}. Please try again.`;
+      controller.enqueue(encoder.encode(msg));
+      buffer = msg;
+    } finally {
+      controller.close();
+
+      if (buffer.trim() && cfg.useMemory && mm) {
+        let toSave = `Assistant: ${buffer.trim()}`;
+        if ((prep.truncated as unknown).database?.success && (prep.truncated as unknown).database.sqlQuery) {
+          toSave += `\n[Query: ${(prep.truncated as unknown).database.sqlQuery}]`;
+        }
+        if (prep.rerankingApplied) {
+          toSave += `\n[Reranking applied: ${((prep.truncated as unknown).rerankedResults || []).length}]`;
+        }
+        await mm.writeToGeneralChatHistory(toSave, gk);
+        logger('debug', 'Streaming response saved to memory', {
+          savedContentLength: toSave.length
+        });
+      }
+
+      if (buffer.trim()) {
+        const citationValidation = this.validateCitations(buffer, prep.citableSources);
+        logger('info', 'Final streaming response citation validation', {
+          ...citationValidation,
+          responseLength: buffer.length,
+          totalStreamTime: Date.now() - streamStart
+        });
+      }
+    }
+  },
+});
   }
   /* ---------- misc helpers ---------- */
-  async executeQuery(query: string): Promise<DatabaseQueryResult> {
-    this.logger('info', 'Executing database query', { queryLength: query.length });
-    const queryStart = Date.now();
+  async executeQuery(query: string): Promise < DatabaseQueryResult > {
+  this.logger('info', 'Executing database query', { queryLength: query.length });
+  const queryStart = Date.now();
 
-    try {
-      const exec = new DatabaseQueryExecutor(this.cfg.modelKey, true);
-      const result = await exec.executeQuery(query);
+  try {
+    const exec = new DatabaseQueryExecutor(this.cfg.modelKey, true);
+    const result = await exec.executeQuery(query);
 
-      this.logger('info', 'Database query executed', {
-        success: result.success,
-        sqlQuery: result.sqlQuery,
-        dataLength: result.data?.length || 0,
-        executionTime: Date.now() - queryStart,
-        hasPerformanceData: !!result.performance
-      });
-
-      return result;
-    } catch (error: any) {
-      this.logger('error', 'Database query execution failed', {
-        error: error.message,
-        executionTime: Date.now() - queryStart
-      });
-      throw error;
-    }
-  }
-
-  getModelInfo() {
-    const conf = AVAILABLE_MODELS[this.cfg.modelKey];
-    const info = {
-      id: String(this.cfg.modelKey),
-      name: conf?.name || toGroqModel(String(this.cfg.modelKey)),
-      temperature: this.cfg.temperature,
-      contextWindow: this.cfg.contextWindow,
-      capabilities: {
-        streaming: this.cfg.streaming,
-        memory: this.cfg.useMemory,
-        database: this.cfg.useDatabase,
-        knowledgeBase: this.cfg.useKnowledgeBase,
-        reranking: this.cfg.useReranking,
-      },
-      reranking: {
-        enabled: this.cfg.useReranking,
-        threshold: this.cfg.rerankingThreshold,
-        maxContextLength: this.cfg.maxContextLength,
-      },
-      debugMode: this.debugMode,
-    };
-
-    this.logger('debug', 'Model info requested', info);
-    return info;
-  }
-
-  async performReranking(query: string, contexts: any[], threshold?: number): Promise<RerankingResult[]> {
-    this.logger('info', 'Performing reranking', {
-      queryLength: query.length,
-      contextCount: contexts.length,
-      threshold: threshold ?? this.cfg.rerankingThreshold
+    this.logger('info', 'Database query executed', {
+      success: result.success,
+      sqlQuery: result.sqlQuery,
+      dataLength: result.data?.length || 0,
+      executionTime: Date.now() - queryStart,
+      hasPerformanceData: !!result.performance
     });
 
-    const rerankStart = Date.now();
-    if (!this.mm) await this.initMemory();
+    return result;
+  } catch(error: unknown) {
+    this.logger('error', 'Database query execution failed', {
+      error: error.message,
+      executionTime: Date.now() - queryStart
+    });
+    throw error;
+  }
+}
 
-    const docs = contexts.map(
-      (c) =>
-        new Document({
-          pageContent: typeof c === "string" ? c : c.pageContent || JSON.stringify(c),
-          metadata: typeof c === "object" ? c.metadata || {} : {},
-        })
+getModelInfo() {
+  const conf = AVAILABLE_MODELS[this.cfg.modelKey];
+  const info = {
+    id: String(this.cfg.modelKey),
+    name: conf?.name || toGroqModel(String(this.cfg.modelKey)),
+    temperature: this.cfg.temperature,
+    contextWindow: this.cfg.contextWindow,
+    capabilities: {
+      streaming: this.cfg.streaming,
+      memory: this.cfg.useMemory,
+      database: this.cfg.useDatabase,
+      knowledgeBase: this.cfg.useKnowledgeBase,
+      reranking: this.cfg.useReranking,
+    },
+    reranking: {
+      enabled: this.cfg.useReranking,
+      threshold: this.cfg.rerankingThreshold,
+      maxContextLength: this.cfg.maxContextLength,
+    },
+    debugMode: this.debugMode,
+  };
+
+  this.logger('debug', 'Model info requested', info);
+  return info;
+}
+
+  async performReranking(
+  query: string,
+  contexts: unknown[],
+  threshold ?: number,
+  userId ?: string
+): Promise < RerankingResult[] > {
+  this.logger('info', 'Performing reranking', {
+    queryLength: query.length,
+    contextCount: contexts.length,
+    threshold: threshold ?? this.cfg.rerankingThreshold
+  });
+
+  const rerankStart = Date.now();
+  if(!this.mm) await this.initMemory();
+
+  const docs = contexts.map(
+    (c) =>
+      new Document({
+        pageContent: typeof c === "string" ? c : c.pageContent || JSON.stringify(c),
+        metadata: typeof c === "object" ? (c as unknown).metadata || {} : {},
+      })
+  );
+
+  try {
+    const results = await this.mm!.rerankDocuments(
+      query,
+      docs,
+      this.cfg.modelKey,
+      threshold ?? this.cfg.rerankingThreshold
     );
 
-    try {
-      const results = await this.mm!.rerankDocuments(
-        query,
-        docs,
-        this.cfg.modelKey,
-        threshold ?? this.cfg.rerankingThreshold
-      );
+    const execMs = Date.now() - rerankStart;
+    this.logger('info', 'Reranking completed', {
+      resultsCount: results.length,
+      executionTime: execMs,
+      avgRelevanceScore: results.length > 0
+        ? results.reduce((s, r) => s + (r.relevanceScore || 0), 0) / results.length
+        : 0
+    });
 
-      this.logger('info', 'Reranking completed', {
-        resultsCount: results.length,
-        executionTime: Date.now() - rerankStart,
-        avgRelevanceScore: results.length > 0
-          ? results.reduce((sum, r) => sum + (r.relevanceScore || 0), 0) / results.length
-          : 0
-      });
+    // NEW: record analytics (no-op if userId not provided)
+    if(userId) {
+      try {
+        await this.analytics.record(userId, query, results, execMs);
+      } catch (e: unknown) {
+        this.logger('warn', 'Failed to record reranking analytics (explicit API)', { error: e?.message });
+      }
+    }
 
       return results;
-    } catch (error: any) {
-      this.logger('error', 'Reranking failed', {
-        error: error.message,
-        executionTime: Date.now() - rerankStart
-      });
-      throw error;
-    }
+  } catch(error: unknown) {
+    this.logger('error', 'Reranking failed', {
+      error: error?.message,
+      executionTime: Date.now() - rerankStart
+    });
+    throw error;
   }
+}
 
-  // Debug helper methods
-  setDebugMode(enabled: boolean) {
-    this.debugMode = enabled;
-    this.logger('info', 'Debug mode changed', { debugMode: enabled });
-  }
 
-  getDebugInfo() {
-    return {
-      debugMode: this.debugMode,
-      config: this.cfg,
-      memoryManagerInitialized: !!this.mm,
-      modelInfo: this.getModelInfo()
-    };
-  }
+// Debug helper methods
+setDebugMode(enabled: boolean) {
+  this.debugMode = enabled;
+  this.logger('info', 'Debug mode changed', { debugMode: enabled });
+}
+
+getDebugInfo() {
+  return {
+    debugMode: this.debugMode,
+    config: this.cfg,
+    memoryManagerInitialized: !!this.mm,
+    modelInfo: this.getModelInfo()
+  };
+}
 
   // Performance monitoring
-  async healthCheck(): Promise<{
-    status: 'healthy' | 'degraded' | 'unhealthy';
-    checks: Record<string, { status: boolean; time?: number; error?: string }>;
-    timestamp: string;
-  }> {
-    this.logger('info', 'Starting health check');
-    const healthStart = Date.now();
+  async healthCheck(): Promise < {
+  status: 'healthy' | 'degraded' | 'unhealthy';
+  checks: Record<string, { status: boolean; time?: number; error?: string }>;
+  timestamp: string;
+} > {
+  this.logger('info', 'Starting health check');
+  const healthStart = Date.now();
 
-    const checks: Record<string, { status: boolean; time?: number; error?: string }> = {};
+  const checks: Record<string, { status: boolean; time ?: number; error ?: string }> = { };
 
-    // Memory check
-    try {
-      const memStart = Date.now();
-      if (this.cfg.useMemory) {
-        await this.initMemory();
-        checks.memory = { status: true, time: Date.now() - memStart };
-      } else {
-        checks.memory = { status: true, time: 0 };
-      }
-    } catch (error: any) {
-      checks.memory = { status: false, error: error.message };
-    }
+// Memory check
+try {
+  const memStart = Date.now();
+  if (this.cfg.useMemory) {
+    await this.initMemory();
+    checks.memory = { status: true, time: Date.now() - memStart };
+  } else {
+    checks.memory = { status: true, time: 0 };
+  }
+} catch (error: unknown) {
+  checks.memory = { status: false, error: error.message };
+}
 
-    // Model check
-    try {
-      const modelStart = Date.now();
-      this.model(); // build once
-      checks.model = { status: true, time: Date.now() - modelStart };
-    } catch (error: any) {
-      checks.model = { status: false, error: error.message };
-    }
+// Model check
+try {
+  const modelStart = Date.now();
+  this.model(); // build once
+  checks.model = { status: true, time: Date.now() - modelStart };
+} catch (error: unknown) {
+  checks.model = { status: false, error: error.message };
+}
 
-    // Database check (if enabled)
-    if (this.cfg.useDatabase) {
-      try {
-        const dbStart = Date.now();
-        await isDatabaseQuery("test query");
-        checks.database = { status: true, time: Date.now() - dbStart };
-      } catch (error: any) {
-        checks.database = { status: false, error: error.message };
-      }
-    }
+// Database check (if enabled)
+if (this.cfg.useDatabase) {
+  try {
+    const dbStart = Date.now();
+    await isDatabaseQuery("test query");
+    checks.database = { status: true, time: Date.now() - dbStart };
+  } catch (error: unknown) {
+    checks.database = { status: false, error: error.message };
+  }
+}
 
-    const failedChecks = Object.values(checks).filter(check => !check.status).length;
-    const status = failedChecks === 0 ? 'healthy' :
-      failedChecks <= 1 ? 'degraded' : 'unhealthy';
+const failedChecks = Object.values(checks).filter(check => !check.status).length;
+const status = failedChecks === 0 ? 'healthy' :
+  failedChecks <= 1 ? 'degraded' : 'unhealthy';
 
-    const result = {
-      status,
-      checks,
-      timestamp: new Date().toISOString(),
-      totalHealthCheckTime: Date.now() - healthStart
-    };
+const result = {
+  status,
+  checks,
+  timestamp: new Date().toISOString(),
+  totalHealthCheckTime: Date.now() - healthStart
+};
 
-    this.logger('info', 'Health check completed', result);
-    return result;
+this.logger('info', 'Health check completed', result);
+return result;
   }
 }
 
@@ -2190,7 +2238,7 @@ export class ModernEmbeddingIntegration {
   constructor(cfg?: Partial<EmbeddingConfig>) {
     this.mm = new MemoryManager(cfg);
   }
-  processFile(fileUrl: string, documentId: string, options: any = {}) {
+  processFile(fileUrl: string, documentId: string, options: unknown = {}) {
     return this.mm.processFile(fileUrl, documentId, options);
   }
   getEmbeddingInfo() {
@@ -2210,9 +2258,9 @@ export async function loadFile(fileUrl: string, documentId: string, cfg?: Partia
 }
 
 /* -----------------------------------------------------------------------------
- * Auth / errors / headers
- * -------------------------------------------------------------------------- */
-export async function handleAuthAndRateLimit(request: Request): Promise<{ user: any; success: boolean; error?: NextResponse }> {
+/ * Auth / errors / headers
+/ * -------------------------------------------------------------------------- */
+export async function handleAuthAndRateLimit(request: Request): Promise<{ user: unknown; success: boolean; error?: NextResponse }> {
   try {
     const user = await currentUser();
     if (!user?.id) {
@@ -2222,13 +2270,13 @@ export async function handleAuthAndRateLimit(request: Request): Promise<{ user: 
     const { success } = await rateLimit(identifier);
     if (!success) return { user, success: false, error: new NextResponse("Rate limit exceeded", { status: 429 }) };
     return { user, success: true };
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Auth/RateLimit failed:", err.message, err.stack);
     return { user: null, success: false, error: new NextResponse(`Authentication error: ${err.message}`, { status: 500 }) };
   }
 }
 
-export function createErrorResponse(error: any, status = 500): NextResponse {
+export function createErrorResponse(error: unknown, status = 500): NextResponse {
   const msg = process.env.NODE_ENV === "development" ? error.message || "Internal error" : "An error occurred";
   return NextResponse.json({ error: msg, timestamp: new Date().toISOString() }, { status });
 }
@@ -2245,7 +2293,7 @@ function toAsciiHeaderValue(value: string): string {
     .slice(0, 200);
 }
 
-export function setAgentResponseHeaders(response: any, agentResponse: EnhancedAgentResponse): void {
+export function setAgentResponseHeaders(response: unknown, agentResponse: EnhancedAgentResponse): void {
   const dev = process.env.NODE_ENV === "development";
 
   try {
@@ -2293,7 +2341,7 @@ export function setAgentResponseHeaders(response: any, agentResponse: EnhancedAg
 
   } catch (error) {
     console.warn("Failed to set some response headers:", error);
-    response.headers.set("X-Model-Used", agentResponse.model || "unknown");
+    response.headers.set("X-Model-Used", agentResponse.model || "any");
     response.headers.set("X-Processing-Time", `${agentResponse.executionTime || 0}ms`);
   }
 }
@@ -2301,11 +2349,11 @@ export function setAgentResponseHeaders(response: any, agentResponse: EnhancedAg
 /* -----------------------------------------------------------------------------
  * Validators
  * -------------------------------------------------------------------------- */
-export const validateChatRequest = (body: any) => {
+export const validateChatRequest = (body: unknown) => {
   const errors: string[] = [];
   let userMessage = "";
   if (Array.isArray(body.messages) && body.messages.length) {
-    const last = [...body.messages].reverse().find((m: any) => m.role === "user");
+    const last = [...body.messages].reverse().find((m: unknown) => m.role === "user");
     if (last?.content) userMessage = last.content;
   } else if (body.prompt) {
     userMessage = body.prompt;
@@ -2334,7 +2382,7 @@ export const validateChatRequest = (body: any) => {
   };
 };
 
-export const validateDocumentChatRequest = (body: any) => {
+export const validateDocumentChatRequest = (body: unknown) => {
   const errors: string[] = [];
   if (!body.prompt?.trim()) errors.push("Prompt is required");
   if (body.prompt?.length > 5000) errors.push("Prompt too long (max 5,000 characters)");
@@ -2346,7 +2394,7 @@ export const validateDocumentChatRequest = (body: any) => {
   return { prompt: body.prompt?.trim(), useReranking: body.useReranking, rerankingThreshold: body.rerankingThreshold, errors };
 };
 
-export const validateDatabaseRequest = (body: any) => {
+export const validateDatabaseRequest = (body: unknown) => {
   const errors: string[] = [];
   if (!body.question?.trim() && !body.directQuery?.trim()) errors.push("Either 'question' or 'directQuery' is required");
   if (body.question?.length > 1000) errors.push("Question too long (max 1,000 characters)");
@@ -2451,6 +2499,11 @@ export async function initializeAgent(config: {
   });
 
   return { agent, embeddingIntegration, healthStatus };
+}
+
+// or as a standalone export:
+export async function getRerankingStats(userId: string) {
+  return await RerankingAnalytics.getInstance().getUserStats(userId);
 }
 
 export default AIAgent;

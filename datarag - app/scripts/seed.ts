@@ -1,4 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
+import { PrismaClient } from "@prisma/client";
 
 const db = new PrismaClient();
 
@@ -67,7 +67,7 @@ async function main() {
                     name: "Quality Assurance Documents",
                 }
             ],
-        });        
+        });
     }
     catch(e){
                 console.error("Error seeding database: ", e);

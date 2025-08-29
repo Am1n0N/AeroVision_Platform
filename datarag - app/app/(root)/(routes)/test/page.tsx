@@ -11,7 +11,6 @@ import {
   XCircle,
   Clock,
   Target,
-  BookOpen,
   Brain,
   Settings as SettingsIcon,
   Download,
@@ -66,7 +65,7 @@ export interface EvaluationResult {
   retrievedContexts?: string[];
   metadata: {
     modelUsed?: string;
-    contextSources?: any;
+    contextSources?: unknown;
     rerankingApplied?: boolean;
     totalContextTokens?: number;
     retrievalMetrics?: {
@@ -212,10 +211,10 @@ function computeRunAnalysis(results: EvaluationResult[]) {
       completeness: scoreStats(results.map(r => r.scores.completeness)),
       coherence: scoreStats(results.map(r => r.scores.coherence)),
     },
-    modelPerformance: [] as any[],
-    categoryPerformance: [] as any[],
-    difficultyPerformance: [] as any[],
-    trends: [] as any[], // per run: show per-testCase “trend”
+    modelPerformance: [] as unknown[],
+    categoryPerformance: [] as unknown[],
+    difficultyPerformance: [] as unknown[],
+    trends: [] as unknown[], // per run: show per-testCase “trend”
   };
 
   // group helpers
@@ -225,8 +224,8 @@ function computeRunAnalysis(results: EvaluationResult[]) {
   // model perf
   const byModel = by(results, r => (r.model || "Unknown") as string);
   metrics.modelPerformance = Object.entries(byModel).map(([model, rs]) => {
-    const scores = rs.map((r: any) => r.scores.overall);
-    const exec = rs.map((r: any) => r.executionTime || 0);
+    const scores = rs.map((r: unknown) => r.scores.overall);
+    const exec = rs.map((r: unknown) => r.executionTime || 0);
     const m = mean(scores);
     return {
       model,
@@ -241,7 +240,7 @@ function computeRunAnalysis(results: EvaluationResult[]) {
   // category perf
   const byCat = by(results, r => (r.category || "Unknown") as string);
   metrics.categoryPerformance = Object.entries(byCat).map(([category, rs]) => {
-    const scores = rs.map((r: any) => r.scores.overall);
+    const scores = rs.map((r: unknown) => r.scores.overall);
     const m = mean(scores);
     return { category, avgScore: m, scoreStd: std(scores, m), testCount: rs.length };
   });
@@ -249,7 +248,7 @@ function computeRunAnalysis(results: EvaluationResult[]) {
   // difficulty perf
   const byDiff = by(results, r => (r.difficulty || "Unknown") as string);
   metrics.difficultyPerformance = Object.entries(byDiff).map(([difficulty, rs]) => {
-    const scores = rs.map((r: any) => r.scores.overall);
+    const scores = rs.map((r: unknown) => r.scores.overall);
     const m = mean(scores);
     return { difficulty, avgScore: m, scoreStd: std(scores, m), testCount: rs.length };
   });
@@ -258,7 +257,7 @@ function computeRunAnalysis(results: EvaluationResult[]) {
   const byCase = by(results, r => (r.testCase || "Unknown") as string);
   metrics.trends = Object.entries(byCase).map(([testCase, rs]) => ({
     testCase,
-    avgScore: mean(rs.map((r: any) => r.scores.overall)),
+    avgScore: mean(rs.map((r: unknown) => r.scores.overall)),
     testCount: rs.length,
   }));
 
@@ -566,7 +565,7 @@ function ConfigurationPanel({
       alert(`Dataset "${result.dataset.name}" uploaded with ${result.dataset.itemCount} items.`);
       setShowUploadModal(false);
       window.location.reload();
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Upload error:", error);
       alert(`Upload failed: ${error?.message || error}`);
     } finally {
@@ -671,8 +670,8 @@ function ConfigurationPanel({
                   <label key={c.key} className="flex items-center">
                     <input
                       type="checkbox"
-                      checked={(config as any)[c.key] as boolean}
-                      onChange={(e) => onChange({ [c.key]: e.target.checked } as any)}
+                      checked={(config as unknown)[c.key] as boolean}
+                      onChange={(e) => onChange({ [c.key]: e.target.checked } as unknown)}
                       className="w-4 h-4 rounded accent-neutral-900 dark:accent-neutral-100"
                     />
                     <c.Icon className="w-4 h-4 ml-3 mr-2 text-neutral-500 dark:text-neutral-400" />
@@ -1136,12 +1135,13 @@ export default function EvaluationSystem() {
         const res = await fetch("/api/evaluate");
         const json = await res.json();
         const items =
-          json?.evaluationRuns?.map((r: any) => ({
+          json?.evaluationRuns?.map((r: unknown) => ({
             id: r.id,
             createdAt: r.createdAt,
             title: r.title,
           })) ?? [];
         setRunHistory(items);
+        if (!selectedRunId && items[0]?.id) setSelectedRunId(items[0].id);
         // if you want to default to the last run, uncomment:
         // if (!selectedRunId && items[0]?.id) setSelectedRunId(items[0].id);
       } catch {
@@ -1149,7 +1149,7 @@ export default function EvaluationSystem() {
       }
     })();
     // no deps → only on mount
-  }, []);
+  }, [selectedRunId]);
 
 
   useEffect(() => {
@@ -1251,18 +1251,24 @@ export default function EvaluationSystem() {
   }, [results, selectedBaseModels]);
 
   // Hydrate from run ID
+  // In hydrateFromRunId:
   async function hydrateFromRunId(id: string) {
     try {
-      const res = await fetch(`/api/evaluation/${id}`);
+      const res = await fetch(`/api/evaluate/${id}`); // note: /evaluate (not /evaluation)
       const json = await res.json();
       if (json?.success && json?.evaluationRun?.results) {
-        setResults(json.evaluationRun.results as EvaluationResult[]);
+        const parsed = typeof json.evaluationRun.results === "string"
+          ? JSON.parse(json.evaluationRun.results)
+          : json.evaluationRun.results;
+        setResults(parsed as EvaluationResult[]);
         setConfig((prev) => ({ ...prev, ...(json.evaluationRun.config || {}) }));
         setRunId(id);
+        setSelectedRunId(id); // <<< make Analysis show this run
         setActiveTab("results");
       }
     } catch { }
   }
+
 
   // Load models on mount
   useEffect(() => {
@@ -1392,7 +1398,7 @@ export default function EvaluationSystem() {
             if (!trimmed) continue;
 
             const snap = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
-            let evt: any;
+            let evt: unknown;
             try {
               evt = JSON.parse(snap);
             } catch {
@@ -1508,7 +1514,7 @@ export default function EvaluationSystem() {
               return (
                 <button
                   key={t.id}
-                  onClick={() => setActiveTab(t.id as any)}
+                  onClick={() => setActiveTab(t.id as unknown)}
                   className={[
                     "flex items-center px-4 py-2 rounded-lg font-medium transition-colors",
                     active ? "bg-neutral-900 text-white dark:bg-white dark:text-black" : "text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800",
@@ -1621,9 +1627,9 @@ export default function EvaluationSystem() {
             onChange={(patch) => {
               if (patch.models) setSelectedBaseModels(patch.models);
               if (patch.embeddingModel) setSelectedEmbeddingModel(patch.embeddingModel);
-              const rest: Partial<EvaluationConfig> = { ...(patch as any) };
-              delete (rest as any).models;
-              delete (rest as any).embeddingModel;
+              const rest: Partial<EvaluationConfig> = { ...(patch as unknown) };
+              delete (rest as unknown).models;
+              delete (rest as unknown).embeddingModel;
               if (Object.keys(rest).length) setConfig((prev) => ({ ...prev, ...(rest as EvaluationConfig) }));
             }}
             onDatasetChange={setSelectedDatasetId}
@@ -1841,7 +1847,35 @@ export default function EvaluationSystem() {
               </div>
             ) : (
               <div className="space-y-6">
-                {/* Trends & aggregate metrics (works with previous runs too) */}
+                <div className="rounded-xl border border-neutral-200/70 dark:border-neutral-800/80 bg-white/70 dark:bg-neutral-900/60 backdrop-blur p-6">
+                  <div className="flex items-center gap-4">
+                    <div className="flex-1">
+                      <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+                        Select a past run (or use aggregate)
+                      </label>
+                      <select
+                        value={selectedRunId}
+                        onChange={(e) => setSelectedRunId(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-neutral-500"
+                      >
+                        <option value="">Aggregate (by time range)</option>
+                        {runHistory.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.title || new Date(r.createdAt).toLocaleString()}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {selectedRunId && (
+                      <button
+                        onClick={() => setSelectedRunId("")}
+                        className="px-4 py-2 rounded-lg border border-neutral-300 dark:border-neutral-700 text-neutral-800 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
                 <TrendAnalytics
                   models={models}
                   metrics={metrics}
@@ -1860,7 +1894,7 @@ export default function EvaluationSystem() {
                     {(["retrieval", "augmentation", "generation"] as const).map((key) => {
                       const fromResults =
                         results.length > 0
-                          ? results.reduce((s, r) => s + (r.scores as any)[key], 0) / results.length
+                          ? results.reduce((s, r) => s + (r.scores as unknown)[key], 0) / results.length
                           : null;
                       const fromMetrics =
                         metrics?.avgScores?.[key]?.mean ?? 0;
@@ -1932,7 +1966,7 @@ export default function EvaluationSystem() {
                       </div>
                     ) : (
                       <div className="space-y-4">
-                        {(metrics?.categoryPerformance ?? []).map((cp: any) => {
+                        {(metrics?.categoryPerformance ?? []).map((cp: unknown) => {
                           const tone = TONES[toneFromString(cp.category)];
                           const avg = cp.avgScore ?? 0;
                           return (
@@ -1993,7 +2027,7 @@ export default function EvaluationSystem() {
                       </div>
                     ) : (
                       <div className="space-y-4">
-                        {(metrics?.difficultyPerformance ?? []).map((dp: any) => {
+                        {(metrics?.difficultyPerformance ?? []).map((dp: unknown) => {
                           const avg = dp.avgScore ?? 0;
                           return (
                             <div key={dp.difficulty} className="flex items-center justify-between p-4 rounded-lg border border-neutral-200 dark:border-neutral-800">

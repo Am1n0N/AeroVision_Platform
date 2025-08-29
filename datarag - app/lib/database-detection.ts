@@ -30,7 +30,7 @@ const model = new ChatGroq({
 });
 
 // Helper to extract and parse JSON from content
-function extractJson(content: string): any {
+function extractJson(content: string): unknown {
   // Remove any potential wrappers or artifacts
   const cleaned = content
     .replace(/```json/g, '')

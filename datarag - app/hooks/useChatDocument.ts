@@ -41,8 +41,8 @@ async function getChat(chatId: string): Promise<GetChatResponse> {
 }
 
 const useChatDocument = (chatId: string) => {
-    const [document, setDocument] = useState<any>(null);
-    const [messages, setMessages] = useState<any[]>([]);
+    const [document, setDocument] = useState<unknown>(null);
+    const [messages, setMessages] = useState<unknown[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
@@ -69,7 +69,7 @@ const useChatDocument = (chatId: string) => {
                     setError(null);
                 }
 
-            } catch (e: any) {
+            } catch (e: unknown) {
                 if (active) setError(e.message || "Failed to fetch document");
             } finally {
                 if (active) setLoading(false);

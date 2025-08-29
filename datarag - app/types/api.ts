@@ -5,7 +5,7 @@ export interface Message {
   role: "user" | "assistant" | "system";
   content: string;
   createdAt?: Date;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ChatRequest {
@@ -21,7 +21,7 @@ export interface ChatRequest {
 
 export interface DatabaseQueryResult {
   success: boolean;
-  data?: Record<string, any>[];
+  data?: Record<string, unknown>[];
   sqlQuery?: string;
   error?: string;
   summary?: string;

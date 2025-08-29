@@ -24,7 +24,7 @@ export interface SourceReference {
   pageNumber?: number;
   snippet: string;
   relevanceScore?: number;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   url?: string;
   timestamp?: string;
 }
@@ -168,13 +168,13 @@ export const useUserSettings = () => {
    Models (unchanged)
 ================================= */
 
-let modelsCache: any[] | null = null;
+let modelsCache: unknown[] | null = null;
 let modelsFetchedAt = 0;
-let modelsInFlight: Promise<any[]> | null = null;
+let modelsInFlight: Promise<unknown[]> | null = null;
 const MODELS_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 export const useModels = () => {
-  const [models, setModels] = useState<any[]>(modelsCache ?? []);
+  const [models, setModels] = useState<unknown[]>(modelsCache ?? []);
   const [isLoading, setIsLoading] = useState(false);
 
   const fetchModels = useCallback(async (opts?: { force?: boolean }) => {
@@ -449,7 +449,7 @@ export const useChat = (options: UseChatOptions = {}) => {
       const existingId = currentSession?.id?.trim() ? currentSession.id : undefined;
       const effectiveSessionId = sessionId ?? existingId ?? lastSessionIdRef.current ?? undefined;
 
-      const body: any = {
+      const body: unknown = {
         messages: [{ role: 'user', content: message.trim() }],
         sessionId: effectiveSessionId,
         model: selectedModel,
@@ -828,7 +828,7 @@ export const useChat = (options: UseChatOptions = {}) => {
 
       // Persist to backend if session exists
       if (currentSession.id) {
-        updateSession(currentSession.id, updates as any).catch(() => {
+        updateSession(currentSession.id, updates as unknown).catch(() => {
           /* non-fatal */
         });
       }

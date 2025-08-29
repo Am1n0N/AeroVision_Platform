@@ -4,10 +4,7 @@ import { Card, CardFooter, CardHeader } from "@/components/ui/card";
 import Link from "next/link";
 import PdfThumbnail from "./pdf-thumbnail";
 import { DocumentDisplayToggle } from "./document-display-toggle";
-import { Button } from "@/components/ui/button";
-import { Grid, ListIcon } from "lucide-react";
 import { DocumentsTable } from "./documents-table";
-import { access } from "fs";
 
 interface DocumentsProps {
   data: Document[];

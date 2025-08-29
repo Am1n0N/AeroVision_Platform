@@ -33,11 +33,11 @@ const getPool = (): Pool => {
     pool = mysql.createPool(dbConfig);
 
     // These 'on' handlers are convenience logs; cast to any for runtime support
-    (pool as any).on?.("connection", (connection: any) => {
+    (pool as unknown).on?.("connection", (connection: unknown) => {
       log(`New connection established ${connection?.threadId ?? ""}`);
     });
 
-    (pool as any).on?.("error", (err: any) => {
+    (pool as unknown).on?.("error", (err: unknown) => {
       log("Database pool error:", err?.message);
       if (err?.code === "PROTOCOL_CONNECTION_LOST") {
         pool = null; // Force recreation on next call
@@ -59,6 +59,7 @@ const logPanel = (opts: { title: string; content: string; level?: "info" | "erro
   if (process.env.SQL_TOOL_DEBUG === "true") {
     const timestamp = new Date().toISOString();
     const level = opts.level || "info";
+    console.log(`${timestamp} [${level.toUpperCase()}] ${opts.title}: ${opts.content}`);
   }
 };
 
@@ -98,7 +99,7 @@ const withSqlConnection = async <T>(
       }
 
       return result;
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (conn && !readonly) {
         try {
           await conn.rollback();
@@ -556,11 +557,11 @@ export const repairToMySQL = (sql: string): RepairResult => {
         repairs.push({
           type,
           original: match,
-          replacement: typeof replacement === "string" ? replacement : (replacement as any)(match),
+          replacement: typeof replacement === "string" ? replacement : (replacement as unknown)(match),
           confidence,
         });
       });
-      repairedSql = repairedSql.replace(pattern, replacement as any);
+      repairedSql = repairedSql.replace(pattern, replacement as unknown);
     }
   };
 
@@ -782,7 +783,7 @@ export const extractQuery = (raw: string): string => {
   }
 
   // Final cleanup
-  let cleaned = txt.replace(/^["{]+/, '').replace(/["}]+$/, '');
+  const cleaned = txt.replace(/^["{]+/, '').replace(/["}]+$/, '');
 
   if (process.env.SQL_TOOL_DEBUG === "true") {
     log('Final fallback result:', JSON.stringify(cleaned));
@@ -792,7 +793,7 @@ export const extractQuery = (raw: string): string => {
 };
 
 // Alternative: More robust JSON parsing function
-export const safeJsonParse = (jsonString: string): any => {
+export const safeJsonParse = (jsonString: string): unknown => {
   try {
     return JSON.parse(jsonString);
   } catch (error) {
@@ -878,11 +879,11 @@ Return **JSON only**: {"query":"..."}
 // -----------------------------
 // Normalizer & default SQL (NEW)
 // -----------------------------
-const normalizeExecuteSqlArgs = (raw: any) => {
+const normalizeExecuteSqlArgs = (raw: unknown) => {
   if (typeof raw === "string") {
     return { reasoning: "Auto-generated SQL execution rationale.", user_question: raw };
   }
-  const o: any = { ...(raw || {}) };
+  const o: unknown = { ...(raw || {}) };
 
   if (!o.reasoning || typeof o.reasoning !== "string" || o.reasoning.trim().length < 15) {
     o.reasoning = "Auto-generated SQL execution rationale.";
@@ -898,7 +899,7 @@ const normalizeExecuteSqlArgs = (raw: any) => {
   return o;
 };
 
-const defaultSqlFromQuestion = (_q?: string) =>
+const defaultSqlFromQuestion = () =>
   `
 SELECT
   flight_number,
@@ -944,16 +945,16 @@ export const listTables = new DynamicStructuredTool({
            ORDER BY TABLE_NAME`,
           [dbConfig.database]
         );
-        return rows.map((r: any) => ({
+        return rows.map((r: unknown) => ({
           name: r.TABLE_NAME,
           comment: r.TABLE_COMMENT || "",
           estimated_rows: r.TABLE_ROWS || 0,
         }));
       });
 
-      tablesCache.set(cacheKey, { tables: (tables as any[]).map((t: any) => t.name), timestamp: Date.now() });
-      return JSON.stringify((tables as any[]).map((t: any) => t.name));
-    } catch (error: any) {
+      tablesCache.set(cacheKey, { tables: (tables as unknown[]).map((t: unknown) => t.name), timestamp: Date.now() });
+      return JSON.stringify((tables as unknown[]).map((t: unknown) => t.name));
+    } catch (error: unknown) {
       log("Error listing tables:", error?.message);
       return `Error listing tables: ${error?.message}. Please check database connectivity.`;
     }
@@ -995,25 +996,25 @@ export const sampleTable = new DynamicStructuredTool({
         );
 
         const columns = (fields || []).map((f: FieldPacket) => ({
-          name: (f as any).name,
-          type: (f as any).type,
-          length: (f as any).length,
+          name: (f as unknown).name,
+          type: (f as unknown).type,
+          length: (f as unknown).length,
         }));
 
-        let stats: Record<string, any> = {};
+        let stats: Record<string, unknown> = {};
         if (include_stats) {
           const [statsRows] = await conn.execute<RowDataPacket[]>(`SELECT COUNT(*) as total_rows FROM ??`, [
             table_name,
           ]);
-          stats = { total_rows: (statsRows as any)[0]?.total_rows || 0 };
+          stats = { total_rows: (statsRows as unknown)[0]?.total_rows || 0 };
         }
 
         return { columns, sample: rows as RowDataPacket[], stats };
       });
 
-      const sampleData = (result.sample as any[]).map((row) => {
-        const obj: Record<string, any> = {};
-        for (const key of Object.keys(row)) obj[key] = (row as any)[key];
+      const sampleData = (result.sample as unknown[]).map((row) => {
+        const obj: Record<string, unknown> = {};
+        for (const key of Object.keys(row)) obj[key] = (row as unknown)[key];
         return obj;
       });
 
@@ -1028,7 +1029,7 @@ export const sampleTable = new DynamicStructuredTool({
         null,
         2
       );
-    } catch (error: any) {
+    } catch (error: unknown) {
       log(`Error sampling table '${table_name}':`, error?.message);
       return `Error sampling table '${table_name}': ${error?.message}. Verify table name and permissions.`;
     }
@@ -1074,7 +1075,7 @@ export const describeTable = new DynamicStructuredTool({
           [dbConfig.database, table_name]
         );
 
-        let indexes: RowDataPacket[] = [] as any;
+        let indexes: RowDataPacket[] = [] as unknown;
         if (include_indexes) {
           const [idxRows] = await conn.execute<RowDataPacket[]>(
             `SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SEQ_IN_INDEX
@@ -1089,7 +1090,7 @@ export const describeTable = new DynamicStructuredTool({
         return { columns, indexes };
       });
 
-      const columnDetails = (result.columns as any[]).map((col) => ({
+      const columnDetails = (result.columns as unknown[]).map((col) => ({
         name: col.COLUMN_NAME,
         type: col.DATA_TYPE,
         nullable: col.IS_NULLABLE === "YES",
@@ -1112,7 +1113,7 @@ export const describeTable = new DynamicStructuredTool({
         null,
         2
       );
-    } catch (error: any) {
+    } catch (error: unknown) {
       log(`Error describing table '${table_name}':`, error?.message);
       return `Error describing table '${table_name}': ${error?.message}. Verify table exists and you have access.`;
     }
@@ -1124,7 +1125,7 @@ export const describeTable = new DynamicStructuredTool({
 // -----------------------------
 interface ExecutionResult {
   success: boolean;
-  data?: any;
+  data?: unknown;
   error?: string;
   validationResult?: ValidationResult;
   repairResult?: RepairResult;
@@ -1144,7 +1145,7 @@ const ExecuteSqlArgs = z.preprocess(
       attempt_regeneration: z.boolean().default(true),
       max_regeneration_attempts: z.number().int().min(0).max(3).default(2),
     })
-    .refine((d) => Boolean((d as any).sql_query || (d as any).user_question), {
+    .refine((d) => Boolean((d as unknown).sql_query || (d as unknown).user_question), {
       message: "Provide at least one of: sql_query or user_question",
     })
 );
@@ -1196,11 +1197,11 @@ export const executeSql = new DynamicStructuredTool({
           workingSql = extractQuery(String(regenRaw || ""));
         }
         if (!workingSql) {
-          workingSql = defaultSqlFromQuestion(user_question);
+          workingSql = defaultSqlFromQuestion();
         }
-      } catch (e: any) {
+      } catch (e: unknown) {
         log("Auto-generation failed, using default:", e?.message);
-        workingSql = defaultSqlFromQuestion(user_question);
+        workingSql = defaultSqlFromQuestion();
       }
     }
 
@@ -1343,7 +1344,7 @@ export const executeSql = new DynamicStructuredTool({
     // Stage 3: Execute the validated query
     try {
       const executionResult = await withSqlConnection(async (conn) => {
-        let explainResult: any = null;
+        let explainResult: unknown = null;
 
         // Get execution plan if requested
         if (explain_plan && currentQuery.trim().toUpperCase().startsWith("SELECT")) {
@@ -1374,7 +1375,7 @@ export const executeSql = new DynamicStructuredTool({
 
       // Handle SELECT results
       if (Array.isArray(fields) && fields.length > 0) {
-        const columns = fields.map((f: any) => f.name);
+        const columns = fields.map((f: unknown) => f.name);
         const rows = Array.isArray(executionResult.rowsOrHeader)
           ? (executionResult.rowsOrHeader as RowDataPacket[])
           : [];
@@ -1414,7 +1415,7 @@ export const executeSql = new DynamicStructuredTool({
       result.success = true;
       result.data = nonSelectResponse;
       return JSON.stringify(nonSelectResponse, null, 2);
-    } catch (executionError: any) {
+    } catch (executionError: unknown) {
       log("SQL execution error:", executionError?.message);
 
       const errorResponse = {
@@ -1449,23 +1450,23 @@ export type ToolCall = { name: string; args: unknown; id: string };
 
 export const callTool = async (toolCall: ToolCall): Promise<ToolMessage> => {
   const toolsByName = Object.fromEntries(getAvailableTools().map((t) => [t.name, t]));
-  const tool = toolsByName[toolCall.name as keyof typeof toolsByName] as any;
+  const tool = toolsByName[toolCall.name as keyof typeof toolsByName] as unknown;
 
   if (!tool) {
     throw new Error(`Unknown tool: ${toolCall.name}. Available tools: ${Object.keys(toolsByName).join(", ")}`);
   }
 
   try {
-    const content = await tool.invoke(toolCall.args as any);
+    const content = await tool.invoke(toolCall.args as unknown);
     return new ToolMessage({
       content: String(content),
-      tool_call_id: (toolCall as any).id,
+      tool_call_id: (toolCall as unknown).id,
       name: tool.name,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return new ToolMessage({
       content: `Tool execution failed: ${error?.message}`,
-      tool_call_id: (toolCall as any).id,
+      tool_call_id: (toolCall as unknown).id,
       name: tool.name,
     });
   }
@@ -1502,7 +1503,7 @@ try {
 /**
  * Test database connectivity
  */
-export const testConnection = async (): Promise<{ success: boolean; message: string; details?: any }> => {
+export const testConnection = async (): Promise<{ success: boolean; message: string; details?: unknown }> => {
   try {
     const result = await withSqlConnection(async (conn) => {
       const [rows] = await conn.execute("SELECT 1 as test, CONNECTION_ID() as connection_id, VERSION() as version");
@@ -1514,7 +1515,7 @@ export const testConnection = async (): Promise<{ success: boolean; message: str
       message: "Database connection successful",
       details: result,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     return {
       success: false,
       message: `Database connection failed: ${error.message}`,
@@ -1531,15 +1532,15 @@ export const getDatabaseHealth = async (): Promise<string> => {
     const health = await withSqlConnection(async (conn) => {
       const [variables] = (await conn.execute(
         "SHOW GLOBAL STATUS WHERE Variable_name IN ('Connections', 'Threads_connected', 'Threads_running', 'Uptime')"
-      )) as [RowDataPacket[], any];
+      )) as [RowDataPacket[], unknown];
 
       const [processlist] = (await conn.execute(
         "SELECT COUNT(*) as active_connections FROM INFORMATION_SCHEMA.PROCESSLIST"
-      )) as [RowDataPacket[], any];
+      )) as [RowDataPacket[], unknown];
 
       return {
         global_status: variables,
-        active_connections: (processlist as any)[0]?.active_connections || 0,
+        active_connections: (processlist as unknown)[0]?.active_connections || 0,
         pool_config: {
           connection_limit: dbConfig.connectionLimit,
           database: dbConfig.database,
@@ -1550,7 +1551,7 @@ export const getDatabaseHealth = async (): Promise<string> => {
     });
 
     return JSON.stringify(health, null, 2);
-  } catch (error: any) {
+  } catch (error: unknown) {
     return JSON.stringify(
       {
         success: false,
@@ -1568,7 +1569,7 @@ export const getDbConfig = () => ({
   password: "***", // Hide password in exports
 });
 
-export default {
+const database_tools = {
   getAvailableTools,
   callTool,
   executeSql,
@@ -1588,3 +1589,6 @@ export default {
   DATABASE_SCHEMA,
   getDbConfig,
 };
+
+
+export default database_tools;

@@ -320,10 +320,7 @@ export async function GET(request: Request) {
         try {
           // Test database connectivity and AI agent
           const agent = createDatabaseAgent();
-          const testQuery = "SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = DATABASE()";
-
           const testResult = await agent.executeQuery("How many tables are in the database?");
-
           return NextResponse.json({
             status: "healthy",
             timestamp: new Date().toISOString(),

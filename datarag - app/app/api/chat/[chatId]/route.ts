@@ -1,4 +1,4 @@
-// app/api/chat/[chatId]/route.ts
+
 import dotenv from "dotenv";
 import { StreamingTextResponse } from "ai";
 import { NextResponse } from "next/server";
@@ -391,6 +391,8 @@ export async function DELETE(
     chatId: params.chatId,
   });
 
+
+
   try {
     const authResult = await handleAuthAndRateLimit(request);
     if (!authResult.success) {
@@ -398,7 +400,7 @@ export async function DELETE(
       return authResult.error;
     }
 
-    const { user } = authResult;
+    const { user  } = authResult;
 
     const document = await prismadb.document.findFirst({
       where: { id: params.chatId, userId: user.id },
@@ -424,30 +426,6 @@ export async function DELETE(
       requestId,
       deletedCount: deletedMessages.count,
     });
-
-    // Optional: clear memory if your agent supports it
-    try {
-      const agent = createDocumentAgent();
-      const memoryManager = await (agent as any).initializeMemory?.();
-      const documentKey = {
-        documentName: params.chatId,
-        userId: user.id,
-        modelName: "openai/gpt-oss-20b",
-      };
-      // await memoryManager?.clearDocumentHistory?.(documentKey);
-      logWithContext("info", "Memory clearing attempted", {
-        requestId,
-        documentKey,
-      });
-    } catch (memoryError) {
-      logWithContext("warn", "Failed to clear memory (ignored)", {
-        requestId,
-        error:
-          memoryError instanceof Error
-            ? memoryError.message
-            : "Unknown memory error",
-      });
-    }
 
     logWithContext("info", "DELETE success", {
       requestId,

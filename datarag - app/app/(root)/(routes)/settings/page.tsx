@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState, useCallback } from "react";
-import { ArrowLeft, Loader2, Save, CheckCircle2, Undo2 } from "lucide-react";
+import { Loader2, Save, CheckCircle2, Undo2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useUserSettings, useModels } from "@/hooks/useChat";
 import { useTheme } from "next-themes";
@@ -64,7 +64,7 @@ export default function SettingsPage() {
   }, [settings, setTheme]);
 
   const modelOptions = useMemo(() => {
-    return (models || []).map((m: any) => {
+    return (models || []).map((m: unknown) => {
       if (typeof m === "string") return { value: m, label: m };
       const value = m?.id ?? m?.name ?? m?.model ?? "";
       const label = m?.label ?? m?.name ?? value;
@@ -107,7 +107,7 @@ export default function SettingsPage() {
 
   const handleSave = useCallback(async () => {
     setSaving(true);
-    const ok = await updateSettings(local as any);
+    const ok = await updateSettings(local as unknown);
     if (ok) {
       setTheme(local.theme);
       setSaved(true);

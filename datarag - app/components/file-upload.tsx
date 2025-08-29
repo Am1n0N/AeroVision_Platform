@@ -3,11 +3,11 @@ import { Check, Inbox } from "lucide-react";
 import React from "react";
 import { useDropzone } from "react-dropzone";
 
-const FileUpload = ({ onFileUpload, alreadyUploaded }: { onFileUpload: any, alreadyUploaded: Boolean }) => {
+const FileUpload = ({ onFileUpload, alreadyUploaded }: { onFileUpload: unknown, alreadyUploaded: boolean }) => {
   const { getRootProps, getInputProps } = useDropzone({
     accept: { "application/pdf": [".pdf"] },
     maxFiles: 1,
-    onDrop: (acceptedFiles: any) => {
+    onDrop: (acceptedFiles: unknown) => {
         onFileUpload(acceptedFiles[0])
     },
   });

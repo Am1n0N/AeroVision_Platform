@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
     if (!authResult.success) return authResult.error;
 
     const body = await request.json();
-    const { name, description, dataset, tags, isActive = true, metadata } = body ?? {};
+    const { name, description, dataset, isActive = true } = body ?? {};
 
     if (!name || !Array.isArray(dataset)) {
       return NextResponse.json({ error: "Name and dataset array are required" }, { status: 400 });

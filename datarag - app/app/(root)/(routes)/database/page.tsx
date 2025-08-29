@@ -20,7 +20,7 @@ interface QueryResult {
   sqlQuery?: string;
   executionTime?: number;
   rowCount?: number;
-  data?: any[];
+  data?: unknown[];
   answer?: string;
   error?: string;
   note?: string;
@@ -32,7 +32,7 @@ interface TableInfo {
     type: string;
     nullable: boolean;
     key: string;
-    default: any;
+    default: unknown;
     extra: string;
   }[];
 }
@@ -443,7 +443,7 @@ const DatabaseQueryInterface = () => {
         <ul className="text-gray-700 dark:text-gray-300 text-sm space-y-1">
           <li>• Use specific airport codes (JFK, LAX) or airline names</li>
           <li>• Ask for specific date ranges when querying flight data</li>
-          <li>• Use terms like "delays", "on-time", "statistics", "top airports"</li>
+          <li>• Use terms like &quot;delays&quot;, &quot;on-time&quot;, &quot;statistics&quot;, &quot;top airports&quot;</li>
           <li>• For SQL mode, remember to use proper table joins and LIMIT clauses</li>
           <li>• Check the database schema to understand table relationships</li>
         </ul>

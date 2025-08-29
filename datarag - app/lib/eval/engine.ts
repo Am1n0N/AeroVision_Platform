@@ -14,7 +14,7 @@ export interface EvaluationDataPoint {
   groundTruth: string;
   category: string;
   difficulty: "Easy" | "Medium" | "Hard";
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface EvaluationConfig {
@@ -57,7 +57,7 @@ export interface EvaluationResult {
   retrievedDocs: number;
   category: string;
   difficulty: string;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
   // New fields for better tracking
   sessionId?: string;
   contextSources?: Array<{
@@ -383,7 +383,7 @@ export class EvaluationEngine {
   /**
  * Log analytics events
  */
-  private async logAnalyticsEvent(eventType: string, metadata?: Record<string, any>): Promise<void> {
+  private async logAnalyticsEvent(eventType: string, metadata?: Record<string, unknown>): Promise<void> {
     if (!this.config.enableAnalytics) return;
 
     try {
@@ -526,7 +526,7 @@ export class EvaluationEngine {
           try {
             const prompt = `Rate relevance (0..1) of the retrieved chunk to the QUESTION.\n\nQUESTION: ${test.question}\nCHUNK: ${ctx.slice(0, 900)}\n\nOnly the number:`;
             const res = await this.judgeModel!.invoke([new HumanMessage(prompt)]);
-            return safeParseScore((res as any).content, 0.7);
+            return safeParseScore((res as unknown).content, 0.7);
           } catch {
             return 0.7;
           }
@@ -606,7 +606,7 @@ export class EvaluationEngine {
       try {
         const prompt = `Score 0..1: how well does this AUGMENTED CONTEXT synthesize the retrieved info for the QUESTION (keeps essentials, filters noise, organized, faithful)?\n\nQUESTION: ${questionForJudge}\nAUGMENTED CONTEXT: ${(augmentedContext || "").slice(0, 1200)}\n\nNumber only:`;
         const res = await this.judgeModel.invoke([new HumanMessage(prompt)]);
-        const judge = safeParseScore((res as any).content, 0.8);
+        const judge = safeParseScore((res as unknown).content, 0.8);
         return { score: 0.8 * obj.score + 0.2 * judge, details: { ...obj.details, judgeAugmentation: judge } };
       } catch {
         return obj;
@@ -684,7 +684,7 @@ export class EvaluationEngine {
             .replace("{answer}", answer || "")
             .replace("{groundTruth}", gold || "");
           const res = await this.judgeModel!.invoke([new HumanMessage(prompt)]);
-          return safeParseScore((res as any).content, 0.7);
+          return safeParseScore((res as unknown).content, 0.7);
         } catch {
           return 0.7;
         }
@@ -733,7 +733,7 @@ export class EvaluationEngine {
         snippet: string;
       }> = [];
 
-      const ctxs = (response as any)?.contexts ?? {};
+      const ctxs = (response as unknown)?.contexts ?? {};
 
       // Extract various context sources
       if (typeof ctxs.knowledge === "string") {
@@ -757,7 +757,7 @@ export class EvaluationEngine {
       }
 
       if (Array.isArray(ctxs.chunks)) {
-        const chunks = ctxs.chunks.map((c: any) => String(c));
+        const chunks = ctxs.chunks.map((c: unknown) => String(c));
         retrievedContexts.push(...chunks);
         chunks.forEach((chunk, idx) => {
           contextSources.push({
@@ -785,7 +785,7 @@ export class EvaluationEngine {
       // Evaluate components
       const ret = await this.evaluateRetrieval(test, retrievedContexts);
       const aug = await this.evaluateAugmentation(retrievedContexts, augmentedContext, test.question);
-      const gen = await this.evaluateGeneration(test.question, (response as any)?.content ?? "", test.groundTruth);
+      const gen = await this.evaluateGeneration(test.question, (response as unknown)?.content ?? "", test.groundTruth);
 
       const overall = (ret.score + aug.score + gen.score) / 3;
       const executionTime = Date.now() - start;
@@ -812,7 +812,7 @@ export class EvaluationEngine {
         testCase: test.id,
         question: test.question,
         groundTruth: test.groundTruth,
-        generatedAnswer: (response as any)?.content ?? "",
+        generatedAnswer: (response as unknown)?.content ?? "",
         retrievedContexts,
         contextSources,
         sessionId: this.sessionId,
@@ -831,17 +831,17 @@ export class EvaluationEngine {
         category: test.category,
         difficulty: test.difficulty,
         metadata: {
-          modelUsed: (response as any)?.model,
+          modelUsed: (response as unknown)?.model,
           retrievalMetrics: ret.details,
           augmentationMetrics: aug.details,
           generationMetrics: gen.details,
           contextSources: contextSources,
-          rerankingApplied: (response as any)?.metadata?.rerankingApplied,
-          totalContextTokens: (response as any)?.metadata?.totalContextTokens,
+          rerankingApplied: (response as unknown)?.metadata?.rerankingApplied,
+          totalContextTokens: (response as unknown)?.metadata?.totalContextTokens,
           knowledgeBaseEntriesUsed: kbEntries.length,
         },
       };
-    } catch (err: any) {
+    } catch (err: unknown) {
       const executionTime = Date.now() - start;
 
       // Save failed query
@@ -904,7 +904,7 @@ export class EvaluationEngine {
     try {
       for (const model of this.config.models) {
         const agent = createChatAgent({
-          modelKey: model as any,
+          modelKey: model as unknown,
           temperature: this.config.temperature,
           maxTokens: this.config.maxTokens,
           useMemory: true,
@@ -935,7 +935,7 @@ export class EvaluationEngine {
       });
 
       return results;
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Log evaluation error
       await this.logAnalyticsEvent('evaluation_run_error', {
         error: error?.message,
