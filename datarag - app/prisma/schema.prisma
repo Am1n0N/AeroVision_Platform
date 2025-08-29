@@ -1,11 +1,12 @@
-// schema.prisma - Enhanced version for improved evaluation system
+// schema.prisma — PostgreSQL version
+
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "mysql"
-  url      = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL") // e.g. postgresql://user:pass@host:5432/db?schema=public
 }
 
 /* ---------------------------
@@ -34,8 +35,8 @@ model ChatSession {
 
   @@index([userId, isArchived, isPinned])
   @@index([userId, lastMessageAt])
-  @@index([userId, modelKey]) // New index for model-based queries
-  @@index([createdAt]) // Performance index for time-based queries
+  @@index([userId, modelKey])
+  @@index([createdAt])
   @@map("chat_sessions")
 }
 
@@ -63,8 +64,8 @@ model ChatMessage {
 
   @@index([sessionId, createdAt])
   @@index([userId, createdAt])
-  @@index([evaluationRunId]) // New index for evaluation queries
-  @@index([modelUsed, createdAt]) // Performance tracking by model
+  @@index([evaluationRunId])
+  @@index([modelUsed, createdAt])
   @@map("chat_messages")
 }
 
@@ -91,8 +92,8 @@ model MessageSource {
 
   @@index([messageId])
   @@index([type])
-  @@index([sourceCategory, relevanceScore]) // New composite index
-  @@index([usageCount]) // Track popular sources
+  @@index([sourceCategory, relevanceScore])
+  @@index([usageCount])
   @@map("message_sources")
 }
 
@@ -100,13 +101,13 @@ model MessageSource {
    Documents & Categories (Enhanced)
 --------------------------- */
 model Category {
-  id          String     @id @default(uuid())
+  id          String     @id @db.Uuid @default(uuid())
   name        String     @unique
   description String?    @db.Text
   color       String?    @default("#3B82F6") // UI color for category
   isActive    Boolean    @default(true)
   createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt @default(now())
+  updatedAt   DateTime   @updatedAt
 
   // Relations
   documents Document[]
@@ -121,23 +122,23 @@ model Category {
 }
 
 model Document {
-  id          String   @id @default(cuid())
-  title       String
-  description String?  @db.Text
-  fileUrl     String?  @db.Text
-  userId      String
-  status      String   @default("PROCESSING") // PROCESSING, COMPLETED, ERROR
-  errorReason String?  @db.Text
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            String   @id @default(cuid())
+  title         String
+  description   String?  @db.Text
+  fileUrl       String?  @db.Text
+  userId        String
+  status        String   @default("PROCESSING") // PROCESSING, COMPLETED, ERROR
+  errorReason   String?  @db.Text
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   // Enhanced metadata
-  fileSize     Int?     // File size in bytes
-  mimeType     String?
-  language     String?  @default("en")
-  wordCount    Int?
-  pageCount    Int?
-  processingTime Int?   // Time taken to process in milliseconds
+  fileSize       Int?     // File size in bytes
+  mimeType       String?
+  language       String?  @default("en")
+  wordCount      Int?
+  pageCount      Int?
+  processingTime Int?     // Time taken to process in milliseconds
 
   // Usage statistics
   viewCount    Int      @default(0)
@@ -146,7 +147,7 @@ model Document {
 
   // Relations
   category   Category          @relation(fields: [categoryId], references: [id])
-  categoryId String
+  categoryId String            @db.Uuid
   messages   DocumentMessage[]
   chunks     DocumentChunk[]
 
@@ -155,9 +156,9 @@ model Document {
   @@index([status])
   @@index([userId, status])
   @@index([createdAt])
-  @@index([queryCount, lastAccessed]) // Popular documents index
-  @@index([wordCount]) // Size-based queries
-  @@fulltext([title, description]) // Full-text search
+  @@index([queryCount, lastAccessed])
+  @@index([wordCount])
+  // NOTE: MySQL @@fulltext removed for Postgres (see note below)
   @@map("documents")
 }
 
@@ -170,7 +171,7 @@ model DocumentMessage {
   createdAt  DateTime @default(now())
 
   // Enhanced fields
-  relevanceScore Float? // If this conversation was evaluated
+  relevanceScore Float?
   modelUsed      String?
   executionTime  Int?
 
@@ -179,29 +180,29 @@ model DocumentMessage {
 
   @@index([documentId, createdAt])
   @@index([userId])
-  @@index([modelUsed]) // Track model usage in document conversations
+  @@index([modelUsed])
   @@map("document_messages")
 }
 
 model DocumentChunk {
-  id            String   @id @default(cuid())
-  documentId    String
-  content       String   @db.Text
-  chunkIndex    Int
-  pageNumber    Int?
-  chunkType     String?  @default("text")
-  wordCount     Int?
-  tokenEstimate Int?
-  vectorId      String?  @unique
-  metadata      String?  @db.Text
-  createdAt     DateTime @default(now())
+  id             String   @id @default(cuid())
+  documentId     String
+  content        String   @db.Text
+  chunkIndex     Int
+  pageNumber     Int?
+  chunkType      String?  @default("text")
+  wordCount      Int?
+  tokenEstimate  Int?
+  vectorId       String?  @unique
+  metadata       String?  @db.Text
+  createdAt      DateTime @default(now())
 
   // Enhanced fields for better retrieval
-  embedding     String?  @db.LongText // Store embedding as JSON if needed
-  language      String?  @default("en")
+  embedding      String?  @db.Text // from LongText -> Text
+  language       String?  @default("en")
   relevanceScores String? @db.Text // JSON of relevance scores for different queries
-  usageCount    Int      @default(0) // How often this chunk is retrieved
-  avgRelevance  Float?   // Average relevance score
+  usageCount     Int      @default(0)
+  avgRelevance   Float?
 
   // Relations
   document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
@@ -209,9 +210,9 @@ model DocumentChunk {
   @@index([documentId])
   @@index([chunkIndex])
   @@index([documentId, chunkIndex])
-  @@index([usageCount, avgRelevance]) // Popular/relevant chunks
-  @@index([tokenEstimate]) // Token-based filtering
-  @@fulltext([content]) // Full-text search on chunks
+  @@index([usageCount, avgRelevance])
+  @@index([tokenEstimate])
+  // NOTE: MySQL @@fulltext removed for Postgres (see note below)
   @@map("document_chunks")
 }
 
@@ -233,17 +234,17 @@ model KnowledgeBaseEntry {
   // Enhanced fields
   language     String?  @default("en")
   wordCount    Int?
-  isVerified   Boolean  @default(false) // For quality control
-  verifiedBy   String?  // User ID who verified
+  isVerified   Boolean  @default(false)
+  verifiedBy   String?
   verifiedAt   DateTime?
-  version      Int      @default(1) // Version control
-  parentId     String?  // For entry hierarchies
+  version      Int      @default(1)
+  parentId     String?
 
   // Usage tracking
   viewCount    Int      @default(0)
   queryCount   Int      @default(0)
   lastAccessed DateTime?
-  avgRating    Float?   // User ratings
+  avgRating    Float?
   ratingCount  Int      @default(0)
 
   // Relations
@@ -258,26 +259,26 @@ model KnowledgeBaseEntry {
   @@index([userId, isPublic])
   @@index([category, isPublic])
   @@index([createdAt])
-  @@index([queryCount, lastAccessed]) // Popular entries
-  @@index([isVerified, avgRating]) // Quality entries
-  @@index([parentId]) // Hierarchical queries
-  @@fulltext([title, content])
+  @@index([queryCount, lastAccessed])
+  @@index([isVerified, avgRating])
+  @@index([parentId])
+  // NOTE: MySQL @@fulltext removed for Postgres (see note below)
   @@map("knowledge_base_entries")
 }
 
 model KnowledgeBaseTag {
-  id          String @id @default(cuid())
-  name        String @unique @db.VarChar(50)
-  description String? @db.Text
-  color       String? @default("#10B981")
-  usageCount  Int    @default(0)
+  id          String   @id @default(cuid())
+  name        String   @unique @db.VarChar(50)
+  description String?  @db.Text
+  color       String?  @default("#10B981")
+  usageCount  Int      @default(0)
   createdAt   DateTime @default(now())
 
   // Relations
   entries KnowledgeBaseEntry[] @relation("EntryTags")
 
   @@index([name])
-  @@index([usageCount]) // Popular tags
+  @@index([usageCount])
   @@map("knowledge_base_tags")
 }
 
@@ -285,14 +286,14 @@ model KnowledgeBaseRating {
   id        String   @id @default(cuid())
   entryId   String
   userId    String
-  rating    Int      // 1-5 scale
+  rating    Int
   comment   String?  @db.Text
   createdAt DateTime @default(now())
 
   // Relations
   entry KnowledgeBaseEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
 
-  @@unique([entryId, userId]) // One rating per user per entry
+  @@unique([entryId, userId])
   @@index([entryId, rating])
   @@index([userId])
   @@map("knowledge_base_ratings")
@@ -319,13 +320,13 @@ model QueryHistory {
   temperature      Float?
   maxTokens        Int?
   contextSources   String? @db.Text // JSON array of source types used
-  evaluationRunId  String? // If this was part of an evaluation
+  evaluationRunId  String?
   queryType        String? // "evaluation", "chat", "document", "knowledge_base"
-  responseQuality  Float?  // User feedback on response quality
+  responseQuality  Float?
 
   // Performance metrics
-  retrievalTime    Int? // Time spent on retrieval
-  generationTime   Int? // Time spent on generation
+  retrievalTime    Int?
+  generationTime   Int?
   totalTokensUsed  Int?
   promptTokens     Int?
   completionTokens Int?
@@ -335,10 +336,10 @@ model QueryHistory {
   @@index([success])
   @@index([createdAt])
   @@index([userId, success])
-  @@index([evaluationRunId]) // Evaluation queries
-  @@index([queryType, createdAt]) // Query type analysis
-  @@index([modelUsed, success]) // Model performance
-  @@fulltext([query]) // Search within queries
+  @@index([evaluationRunId])
+  @@index([queryType, createdAt])
+  @@index([modelUsed, success])
+  // NOTE: MySQL @@fulltext removed for Postgres (see note below)
   @@map("query_history")
 }
 
@@ -361,10 +362,10 @@ model UserSettings {
   updatedAt            DateTime @updatedAt
 
   // Enhanced evaluation settings
-  evaluationPreferences String? @db.Text // JSON preferences for evaluations
-  autoEvaluate         Boolean @default(false) // Auto-evaluate responses
-  evaluationFrequency  String? @default("weekly") // "daily", "weekly", "monthly"
-  notificationSettings String? @db.Text // JSON notification preferences
+  evaluationPreferences String? @db.Text
+  autoEvaluate          Boolean  @default(false)
+  evaluationFrequency   String?  @default("weekly")
+  notificationSettings  String?  @db.Text
 
   @@index([userId])
   @@map("user_settings")
@@ -379,17 +380,17 @@ model AnalyticsEvent {
   timestamp DateTime @default(now())
 
   // Enhanced fields
-  duration     Int? // Event duration in milliseconds
+  duration     Int?
   success      Boolean @default(true)
   errorMessage String? @db.Text
   userAgent    String? @db.VarChar(500)
-  ipAddress    String? @db.VarChar(45) // Support IPv6
+  ipAddress    String? @db.VarChar(45) // IPv6
 
   @@index([userId, eventType])
   @@index([timestamp])
   @@index([eventType, timestamp])
-  @@index([sessionId]) // Session-based analysis
-  @@index([success, eventType]) // Error analysis
+  @@index([sessionId])
+  @@index([success, eventType])
   @@map("analytics_events")
 }
 
@@ -400,7 +401,7 @@ model EvaluationRun {
   id            String   @id @default(cuid())
   userId        String
   config        String   @db.Text
-  results       String   @db.LongText
+  results       String   @db.Text // from LongText -> Text
   totalTests    Int
   avgScore      Float
   executionTime Int
@@ -409,7 +410,7 @@ model EvaluationRun {
 
   // Enhanced fields
   status        String   @default("completed") // "running", "completed", "failed", "cancelled"
-  progress      Float    @default(0) // 0-100 percentage
+  progress      Float    @default(0)
   startedAt     DateTime?
   completedAt   DateTime?
   errorMessage  String?  @db.Text
@@ -425,17 +426,17 @@ model EvaluationRun {
 
   // Resource usage
   totalTokensUsed      Int?
-  estimatedCost        Float? // In USD
+  estimatedCost        Float?
 
   // Relations
-  datasetId String? // Reference to evaluation dataset used
+  datasetId String?
   dataset   EvaluationDataset? @relation(fields: [datasetId], references: [id])
 
   @@index([userId])
   @@index([createdAt])
-  @@index([status, createdAt]) // Running evaluations
-  @@index([avgScore, createdAt]) // Performance analysis
-  @@index([datasetId]) // Dataset usage
+  @@index([status, createdAt])
+  @@index([avgScore, createdAt])
+  @@index([datasetId])
   @@map("evaluation_runs")
 }
 
@@ -444,7 +445,7 @@ model EvaluationDataset {
   userId      String
   name        String
   description String   @default("")
-  dataset     String   @db.LongText
+  dataset     String   @db.Text // from LongText -> Text
   itemCount   Int
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
@@ -452,15 +453,15 @@ model EvaluationDataset {
 
   // Enhanced fields
   version     Int     @default(1)
-  parentId    String? // For dataset versioning
+  parentId    String?
   language    String  @default("en")
-  difficulty  String? // Overall difficulty: "Easy", "Medium", "Hard", "Mixed"
-  categories  String? @db.Text // JSON array of categories in this dataset
+  difficulty  String?
+  categories  String? @db.Text // JSON array
 
   // Usage statistics
-  usageCount  Int     @default(0)
-  lastUsed    DateTime?
-  avgPerformance Float? // Average score across all runs using this dataset
+  usageCount    Int      @default(0)
+  lastUsed      DateTime?
+  avgPerformance Float?
 
   // Quality metrics
   isVerified  Boolean @default(false)
@@ -469,15 +470,15 @@ model EvaluationDataset {
 
   // Relations
   evaluationRuns EvaluationRun[]
-  parent         EvaluationDataset? @relation("DatasetVersions", fields: [parentId], references: [id])
+  parent         EvaluationDataset?  @relation("DatasetVersions", fields: [parentId], references: [id])
   versions       EvaluationDataset[] @relation("DatasetVersions")
 
   @@index([userId])
   @@index([createdAt])
-  @@index([isActive, usageCount]) // Popular active datasets
-  @@index([parentId]) // Version queries
-  @@index([name, userId]) // Unique name check
-  @@fulltext([name, description]) // Search datasets
+  @@index([isActive, usageCount])
+  @@index([parentId])
+  @@index([name, userId])
+  // NOTE: MySQL @@fulltext removed for Postgres (see note below)
   @@map("evaluation_datasets")
 }
 
@@ -494,17 +495,17 @@ model ModelPerformance {
   updatedAt        DateTime @updatedAt
 
   // Enhanced component scores
-  retrievalScore    Float @default(0)
-  augmentationScore Float @default(0)
-  generationScore   Float @default(0)
-  relevanceScore    Float @default(0)
-  accuracyScore     Float @default(0)
-  completenessScore Float @default(0)
-  coherenceScore    Float @default(0)
+  retrievalScore      Float @default(0)
+  augmentationScore   Float @default(0)
+  generationScore     Float @default(0)
+  relevanceScore      Float @default(0)
+  accuracyScore       Float @default(0)
+  completenessScore   Float @default(0)
+  coherenceScore      Float @default(0)
 
   // Performance trends
-  scoreHistory      String? @db.Text // JSON array of historical scores
-  performanceTrend  String? @default("stable") // "improving", "declining", "stable"
+  scoreHistory      String? @db.Text // JSON
+  performanceTrend  String? @default("stable")
 
   // Cost analysis
   totalTokensUsed   Int?
@@ -512,19 +513,19 @@ model ModelPerformance {
   costPerToken      Float?
 
   // Usage patterns
-  peakPerformanceScore Float?
-  worstPerformanceScore Float?
-  consistencyScore     Float? // Standard deviation of scores
+  peakPerformanceScore   Float?
+  worstPerformanceScore  Float?
+  consistencyScore       Float?
 
   // Comparative metrics
-  rankAmongModels      Int? // Rank compared to other user's models
-  industryPercentile   Float? // Percentile compared to industry benchmarks
+  rankAmongModels     Int?
+  industryPercentile  Float?
 
   @@unique([userId, modelId])
   @@index([userId])
   @@index([modelId])
-  @@index([avgScore, lastEvaluated]) // Top performing models
-  @@index([userId, avgScore]) // User's best models
+  @@index([avgScore, lastEvaluated])
+  @@index([userId, avgScore])
   @@map("model_performance")
 }
 
