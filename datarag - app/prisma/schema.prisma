@@ -538,7 +538,7 @@ model EvaluationMetrics {
   createdAt DateTime @default(now())
 
   // Narrowed types so the unique index fits
-  modelId      String? @db.VarChar(64)  // e.g., "groq/llama-3.1-70b-versatile"
+  modelId      String? @db.VarChar(64)  // e.g., "groq/llama-3.1-8b-instant"
   categoryId   String? @db.VarChar(36)  // UUID length
   difficulty   String? @db.VarChar(16)  // "Easy" | "Medium" | "Hard"
   confidence   Float?
@@ -554,4 +554,3 @@ model EvaluationMetrics {
   @@index([date, value])
   @@map("evaluation_metrics")
 }
-

@@ -16,13 +16,13 @@ export async function POST(request: NextRequest) {
 
     const body = await request.json();
     const {
-      models = ["groq/llama-3.1-70b-versatile"],
+      models = ["groq/llama-3.1-8b-instant"],
       embeddingModel = "nomic-embed-text",
       testRetrieval = true,
       testAugmentation = true,
       testGeneration = true,
       useJudgeLLM = true,
-      judgeModel = "groq/llama-3.1-70b-versatile",
+      judgeModel = "groq/llama-3.1-8b-instant",
       topK = 5,
       temperature = 0.2,
       maxTokens = 2000,

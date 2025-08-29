@@ -270,7 +270,7 @@ function toGroqModel(modelKey?: string, opts?: { purpose?: "chat" | "sql" | "rer
  * Default agent config (now pointing to Groq by default)
  * -------------------------------------------------------------------------- */
 const DEFAULT_CONFIG: Required<AgentConfig> = {
-  modelKey: "groq/llama-3.1-70b-versatile",
+  modelKey: "groq/llama-3.1-8b-instant",
   temperature: 0.2,
   maxTokens: 4000,
   streaming: false,

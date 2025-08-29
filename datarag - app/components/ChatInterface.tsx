@@ -562,7 +562,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, settings }) => {
             </div>
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50 dark:bg-black">
+            <div className="flex-1 overflow-y-auto max-w-screen-2xl p-4 space-y-4 bg-gray-50 dark:bg-black">
               {currentSession.chatMessages.map((message: EnhancedChatMessage) => (
                 <MessageRenderer
                   key={message.id}
