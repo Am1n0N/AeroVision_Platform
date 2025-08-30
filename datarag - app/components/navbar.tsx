@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { Poppins } from "next/font/google";
 import { cn } from "@/lib/utils";
 
@@ -24,14 +23,10 @@ const font = Poppins({
   subsets: ["latin"],
 });
 
-const NAV_LINKS = [
-  { href: "/chat", label: "Chat" },
-  { href: "/database", label: "Data" },
-  { href: "/evaluate", label: "Evaluate" },
-];
+
 
 export const Navbar = () => {
-  const pathname = usePathname();
+
 
   return (
     <header className="fixed inset-x-0 top-0 z-50 ">
@@ -68,7 +63,7 @@ export const Navbar = () => {
             </Link>
           </div>
 
-          
+
 
           {/* Right: actions */}
           <div className="flex items-center gap-2">
