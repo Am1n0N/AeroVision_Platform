@@ -18,7 +18,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <ClerkProvider>
+    <ClerkProvider
+      signInUrl="/sign-in"
+      signUpUrl="/sign-up"
+      afterSignInUrl="/"
+      afterSignUpUrl="/"
+    >
       <html lang="en" suppressHydrationWarning>
         <body className={inter.className}>
           <ThemeProvider
@@ -26,7 +31,7 @@ export default function RootLayout({
             defaultTheme="system"
             enableSystem
             disableTransitionOnChange>
-              <EdgeStoreProvider>{children}</EdgeStoreProvider>
+            <EdgeStoreProvider>{children}</EdgeStoreProvider>
           </ThemeProvider>
         </body>
       </html>

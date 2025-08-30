@@ -4,7 +4,6 @@ import { authMiddleware } from "@clerk/nextjs";
 export default authMiddleware({
   // Pages anyone can visit (no sign-in required)
   publicRoutes: [
-    "/",                     // home (if you want it public)
     "/sign-in(.*)",          // sign-in page must be public
     "/sign-up(.*)",          // sign-up page must be public
     "/api/edgestore/init",   // make EdgeStore init public (remove if you want it protected)
@@ -22,13 +21,15 @@ export default authMiddleware({
   apiRoutes: ["/api/(.*)"],
 
   // Turn this on only when debugging
-  debug: false,
+  debug: true,
 });
 
 // Match app routes + API routes
 export const config = {
   matcher: [
-    "/((?!.+\\.[\\w]+$|_next).*)",
-    "/(api|trpc)(.*)"
+    // Skip Next.js internals and all static files, unless found in search params
+    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
+    // Always run for API routes
+    '/(api|trpc)(.*)',
   ],
-};
+}
