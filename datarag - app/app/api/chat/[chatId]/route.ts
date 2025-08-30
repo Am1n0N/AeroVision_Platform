@@ -1,4 +1,3 @@
-
 import dotenv from "dotenv";
 import { StreamingTextResponse } from "ai";
 import { NextResponse } from "next/server";
@@ -79,9 +78,10 @@ export async function POST(
       return authResult.error;
     }
     const { user } = authResult;
+    const userId = (user as any).id;
     logWithContext("info", "Authentication successful", {
       requestId,
-      userId: (user as any).id,
+      userId,
       userEmail: (user as any).email,
     });
 
@@ -119,10 +119,28 @@ export async function POST(
       );
     }
 
+    // Check if user has access to the document
+    const documentAccess = await prismadb.document.findFirst({
+      where: {
+        id: params.chatId,
+        userId: userId  // Only allow access to user's own documents
+      },
+    });
+
+    if (!documentAccess) {
+      logWithContext("warn", "Document not found or access denied", {
+        requestId,
+        documentId: params.chatId,
+        userId,
+      });
+      return new NextResponse("Document not found or access denied", { status: 404 });
+    }
+
     // Save USER message
     logWithContext("info", "Creating USER message", {
       requestId,
       documentId: params.chatId,
+      userId,
     });
 
     const document = await prismadb.document.update({
@@ -132,12 +150,13 @@ export async function POST(
           create: {
             content: prompt,
             role: "USER",
-            userId: (user as any).id,
+            userId: userId,
           },
         },
       },
       include: {
         messages: {
+          where: { userId: userId },  // Only fetch messages from current user
           orderBy: { createdAt: "desc" },
           take: 10,
         },
@@ -156,9 +175,10 @@ export async function POST(
       requestId,
       documentId: document.id,
       totalMessagesFetched: document.messages.length,
+      userId,
     });
 
-    // Prepare additional context
+    // Prepare additional context using only current user's messages
     const recentMessages = document.messages
       .slice(0, 10)
       .reverse()
@@ -169,7 +189,7 @@ export async function POST(
 Document Title: ${document.title}
 Document Description: ${document.description ?? ""}
 
-Recent Conversation:
+Recent Conversation (User-specific):
 ${recentMessages}
     `.trim();
 
@@ -205,7 +225,7 @@ ${recentMessages}
       stream = await agent.generateStreamingResponse(
         prompt,
         {
-          userId: (user as any).id,
+          userId: userId,
           userName: `${(authResult.user as any).firstName || ""} ${(authResult.user as any).lastName || ""}`.trim(),
           sessionId: params.chatId,
           documentId: params.chatId,
@@ -236,18 +256,17 @@ ${recentMessages}
           length: aiText?.length || 0,
         });
 
-
         // Only save if there's meaningful content
         if (aiText && aiText.trim().length > 0) {
           await prismadb.documentMessage.create({
             data: {
               content: aiText,
               role: "SYSTEM", // Change to "ASSISTANT" if that's your DB enum/UI convention
-              userId: (user as any).id, // Associate to current user; make nullable if schema requires
+              userId: userId, // Associate to current user
               documentId: params.chatId,
             },
           });
-          logWithContext("info", "AI message persisted", { requestId });
+          logWithContext("info", "AI message persisted", { requestId, userId });
         } else {
           logWithContext("warn", "AI stream produced empty content; skipping save", {
             requestId,
@@ -281,7 +300,7 @@ ${recentMessages}
 }
 
 // ---------------------------------------------
-// GET: returns document + messages (unchanged except logging)
+// GET: returns document + messages (user-specific)
 // ---------------------------------------------
 export async function GET(
   request: Request,
@@ -300,10 +319,17 @@ export async function GET(
       return authResult.error;
     }
 
-    const document = await prismadb.document.findUnique({
-      where: { id: params.chatId },
+    const userId = (authResult.user as any).id;
+
+    // Check if user has access to the document
+    const document = await prismadb.document.findFirst({
+      where: {
+        id: params.chatId,
+        userId: userId  // Only allow access to user's own documents
+      },
       include: {
         messages: {
+          where: { userId: userId },  // Only fetch messages from current user
           orderBy: { createdAt: "desc" },
           take: 50,
         },
@@ -312,12 +338,14 @@ export async function GET(
     });
 
     if (!document) {
-      logWithContext("warn", "GET: document not found", {
+      logWithContext("warn", "GET: document not found or access denied", {
         requestId,
         chatId: params.chatId,
+        userId,
       });
-      return NextResponse.json({ error: "Document not found" }, { status: 404 });
+      return NextResponse.json({ error: "Document not found or access denied" }, { status: 404 });
     }
+
     const formattedMessages = document.messages.map((msg: any) => ({
       id: msg.id,
       role: msg.role,
@@ -330,6 +358,7 @@ export async function GET(
       requestId,
       documentId: document.id,
       messagesCount: formattedMessages.length,
+      userId,
     });
 
     return NextResponse.json({
@@ -363,6 +392,7 @@ export async function GET(
           "Document content integration",
           "Context-aware responses",
           "Memory persistence",
+          "User-isolated conversations",
         ],
       },
     });
@@ -379,7 +409,7 @@ export async function GET(
 }
 
 // ---------------------------------------------
-// DELETE: clear conversation (unchanged except logging)
+// DELETE: clear conversation (user-specific)
 // ---------------------------------------------
 export async function DELETE(
   request: Request,
@@ -391,8 +421,6 @@ export async function DELETE(
     chatId: params.chatId,
   });
 
-
-
   try {
     const authResult = await handleAuthAndRateLimit(request);
     if (!authResult.success) {
@@ -401,16 +429,20 @@ export async function DELETE(
     }
 
     const { user  } = authResult;
+    const userId = (user as any).id;
 
     const document = await prismadb.document.findFirst({
-      where: { id: params.chatId, userId: (user as any).id },
+      where: {
+        id: params.chatId,
+        userId: userId  // Only allow access to user's own documents
+      },
     });
 
     if (!document) {
       logWithContext("warn", "DELETE: document not found or access denied", {
         requestId,
         chatId: params.chatId,
-        userId: (user as any).id,
+        userId,
       });
       return NextResponse.json(
         { error: "Document not found or access denied" },
@@ -418,25 +450,31 @@ export async function DELETE(
       );
     }
 
+    // Delete only messages belonging to the current user
     const deletedMessages = await prismadb.documentMessage.deleteMany({
-      where: { documentId: params.chatId },
+      where: {
+        documentId: params.chatId,
+        userId: userId  // Only delete current user's messages
+      },
     });
 
     logWithContext("info", "Messages deleted", {
       requestId,
       deletedCount: deletedMessages.count,
+      userId,
     });
 
     logWithContext("info", "DELETE success", {
       requestId,
       messagesDeleted: deletedMessages.count,
+      userId,
     });
 
     return NextResponse.json({
       message: "Document conversation cleared successfully",
       document_id: params.chatId,
       messages_deleted: deletedMessages.count,
-      user_id: (user as any).id,
+      user_id: userId,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
