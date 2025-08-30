@@ -123,7 +123,6 @@ export async function POST(
     const documentAccess = await prismadb.document.findFirst({
       where: {
         id: params.chatId,
-        userId: userId  // Only allow access to user's own documents
       },
     });
 
@@ -325,7 +324,6 @@ export async function GET(
     const document = await prismadb.document.findFirst({
       where: {
         id: params.chatId,
-        userId: userId  // Only allow access to user's own documents
       },
       include: {
         messages: {

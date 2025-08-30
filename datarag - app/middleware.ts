@@ -4,6 +4,7 @@ import { authMiddleware } from "@clerk/nextjs";
 export default authMiddleware({
   // Pages anyone can visit (no sign-in required)
   publicRoutes: [
+    "/",
     "/sign-in(.*)",          // sign-in page must be public
     "/sign-up(.*)",          // sign-up page must be public
     "/api/edgestore/init",   // make EdgeStore init public (remove if you want it protected)
@@ -21,7 +22,7 @@ export default authMiddleware({
   apiRoutes: ["/api/(.*)"],
 
   // Turn this on only when debugging
-  debug: true,
+  debug: false,
 });
 
 // Match app routes + API routes

@@ -135,7 +135,7 @@ const ChatIdPage: React.FC<ChatIdPageProps> = ({ params }) => {
 
   return (
     <main className="flex w-full ">
-      <div className="mx-auto grid grid-cols-1 gap-4 p-4 lg:grid-cols-2">
+      <div className="mx-auto grid grid-cols-1 gap-8 p-4 lg:grid-cols-2 w-full px-24">
         <section
           aria-label="Document viewer"
           className=" border p-3 bg-card  shadow-sm h-[95vh]"
