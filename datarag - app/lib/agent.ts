@@ -2326,61 +2326,100 @@ export const validateDatabaseRequest = (body: any) => {
 class RerankingAnalytics {
   private static instance: RerankingAnalytics;
   private redis: Redis;
+
   private constructor() {
     this.redis = Redis.fromEnv();
   }
+
   static getInstance() {
-    if (!RerankingAnalytics.instance) RerankingAnalytics.instance = new RerankingAnalytics();
+    if (!RerankingAnalytics.instance) {
+      RerankingAnalytics.instance = new RerankingAnalytics();
+    }
     return RerankingAnalytics.instance;
   }
+
+  /** Safely accept JSON strings or already-parsed objects. */
+  private safeParse<T = any>(v: unknown): T | null {
+    try {
+      if (v == null) return null;
+      if (typeof v === "string") return JSON.parse(v) as T;
+      if (typeof v === "object") return v as T;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   private improvementRatio(results: RerankingResult[]): number {
     if (results.length < 2) return 0;
     const rerankedTop = [...results].sort((a, b) => a.newRank - b.newRank).slice(0, Math.min(3, results.length));
     let improvements = 0;
-    for (let i = 0; i < rerankedTop.length; i++) improvements += Math.max(0, rerankedTop[i].originalRank - i);
+    for (let i = 0; i < rerankedTop.length; i++) {
+      improvements += Math.max(0, rerankedTop[i].originalRank - i);
+    }
     return improvements / Math.min(3, results.length);
   }
+
   async record(userId: string, query: string, results: RerankingResult[], executionTime: number) {
     try {
+      const topRelevanceScore =
+        results.length ? Math.max(...results.map((r) => r.relevanceScore ?? 0)) : 0;
+
       const event = {
         userId,
         query: query.slice(0, 200),
         timestamp: Date.now(),
         resultsCount: results.length,
-        averageRelevanceScore: results.reduce((s, r) => s + r.relevanceScore, 0) / (results.length || 1),
+        averageRelevanceScore:
+          results.reduce((s, r) => s + (r.relevanceScore ?? 0), 0) / (results.length || 1),
         executionTime,
-        topRelevanceScore: Math.max(...results.map((r) => r.relevanceScore)),
+        topRelevanceScore,
         improvementRatio: this.improvementRatio(results),
       };
-      await this.redis.setex(`reranking_events:${userId}:${Date.now()}`, 60 * 60 * 24 * 7, JSON.stringify(event));
+
+      await this.redis.setex(
+        `reranking_events:${userId}:${event.timestamp}`,
+        60 * 60 * 24 * 7,
+        JSON.stringify(event)
+      );
 
       const statsKey = `reranking_stats:${userId}`;
-      const existing = await this.redis.get(statsKey);
-      const stats = existing
-        ? JSON.parse(existing as string)
-        : { totalQueries: 0, totalExecutionTime: 0, averageRelevanceScore: 0, totalImprovements: 0, lastUpdated: Date.now() };
+      // NOTE: Upstash may return string OR object depending on how it was written before.
+      const existing = await this.redis.get<string | Record<string, any>>(statsKey);
+      const current =
+        this.safeParse<Record<string, any>>(existing) ??
+        { totalQueries: 0, totalExecutionTime: 0, averageRelevanceScore: 0, totalImprovements: 0, lastUpdated: Date.now() };
 
-      stats.totalQueries += 1;
-      stats.totalExecutionTime += event.executionTime;
-      stats.averageRelevanceScore = ((stats.averageRelevanceScore * (stats.totalQueries - 1)) + event.averageRelevanceScore) / stats.totalQueries;
-      stats.totalImprovements += event.improvementRatio;
-      stats.lastUpdated = Date.now();
+      const totalQueries = (current.totalQueries ?? 0) + 1;
+      const totalExecutionTime = (current.totalExecutionTime ?? 0) + event.executionTime;
+      const prevAvg = current.averageRelevanceScore ?? 0;
 
+      const stats = {
+        totalQueries,
+        totalExecutionTime,
+        averageRelevanceScore: ((prevAvg * (totalQueries - 1)) + event.averageRelevanceScore) / totalQueries,
+        totalImprovements: (current.totalImprovements ?? 0) + event.improvementRatio,
+        lastUpdated: Date.now(),
+      };
+
+      // Always store as a JSON string
       await this.redis.setex(statsKey, 60 * 60 * 24 * 30, JSON.stringify(stats));
     } catch (e) {
       console.warn("Failed to record reranking analytics", e);
     }
   }
+
   async getUserStats(userId: string) {
     try {
-      const s = await this.redis.get(`reranking_stats:${userId}`);
-      return s ? JSON.parse(s as string) : null;
+      const raw = await this.redis.get<string | Record<string, any>>(`reranking_stats:${userId}`);
+      return this.safeParse<Record<string, any>>(raw);
     } catch (e) {
       console.warn("Failed to get reranking stats", e);
       return null;
     }
   }
 }
+
 
 /* -----------------------------------------------------------------------------*/
 /* Initialization*/

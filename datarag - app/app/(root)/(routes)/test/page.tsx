@@ -831,10 +831,15 @@ function ConfigurationPanel({
                 className="w-full px-3 py-2 border border-neutral-300 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100"
               />
             </div>
-            <div className="text-xs text-neutral-500 dark:text-neutral-400 mb-4">
+            <div className="text-xs text-neutral-500 dark:text-neutral-400 mb-4 text-wrap">
               <p className="mb-1">Expected JSON format:</p>
-              <code className="block bg-neutral-100 dark:bg-neutral-800 p-2 rounded text-xs">
-                [{`{"id":"item_1","question":"...","groundTruth":"...","category":"...","difficulty":"Easy|Medium|Hard"}`}]
+              <code className="block bg-neutral-100 dark:bg-neutral-800 p-2 rounded text-xs text-wrap">
+                [{`{"id":"item_1",
+                "question":"...",
+                "groundTruth":"...",
+                "category":"...",
+                "difficulty":"Easy|Medium|Hard"}`
+                }]
               </code>
             </div>
             <div className="flex justify-end space-x-2">
@@ -1349,6 +1354,7 @@ export default function EvaluationSystem() {
         if (json?.success && json?.dataset) {
           const parsed = typeof json.dataset === "string" ? JSON.parse(json.dataset) : json.dataset;
           setCurrentDataset(parsed);
+
         }
       } catch (error) {
         console.warn("Failed to load dataset details:", error);
