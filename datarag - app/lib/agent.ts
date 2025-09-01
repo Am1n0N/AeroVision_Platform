@@ -204,15 +204,9 @@ class HuggingFaceEmbeddings {
   private waitForModel: boolean;
 
   constructor(options: { model?: string; token?: string; normalize?: boolean; maxRetries?: number; waitForModel?: boolean } = {}) {
-    const token =
-      options.token ||
-      process.env.HUGGING_FACE_ACCESS_TOKEN ||
-      process.env.HUGGINGFACE_API_KEY ||
-      process.env.HUGGINGFACEHUB_API_KEY ||
-      process.env.HUGGINGFACEHUB_API_TOKEN ||
-      process.env.HF_ACCESS_TOKEN;
 
-    this.client = new InferenceClient(token || undefined);
+
+    this.client = new InferenceClient(process.env.HUGGINGFACEHUB_API_KEY);
     this.model = options.model || "sentence-transformers/BAAI/bge-base-en-v1.5";
     this.normalize = options.normalize ?? true;
     this.maxRetries = Math.max(0, options.maxRetries ?? 3);
@@ -303,6 +297,16 @@ class HuggingFaceEmbeddings {
 }
 
 
+/** Normalize different score ranges to [0,1]. */
+function normalizeToUnitInterval(raw: number): number {
+  if (!Number.isFinite(raw)) return 0;
+  // if already in [0,1], keep it
+  if (raw >= 0 && raw <= 1) return raw;
+  // common cosine range [-1,1]
+  if (raw >= -1 && raw <= 1) return (raw + 1) / 2;
+  // cross-encoders often output unbounded logits -> squash
+  return 1 / (1 + Math.exp(-raw));
+}
 
 /* -----------------------------------------------------------------------------
  * Memory Manager (consolidated)
@@ -423,7 +427,6 @@ class MemoryManager {
     return Number.isFinite(envDim) ? envDim : null;
   }
 
-
   private async getModelDimension(modelId: string): Promise<number> {
     // 1) from known table
     const known = (EMBEDDING_MODELS as Record<string, { dimensions: number }>)[modelId];
@@ -482,6 +485,7 @@ class MemoryManager {
       return false;
     }
   }
+
   getEmbeddingInfo() {
     return {
       model: this.cfg.model,
@@ -549,7 +553,6 @@ class MemoryManager {
       topK = 5,
       filters,
       useReranking,
-      modelKey,
       threshold,
     }: { topK?: number; filters?: Record<string, unknown>; useReranking?: boolean; modelKey?: ModelKey; threshold?: number } = {}
   ) {
@@ -565,76 +568,77 @@ class MemoryManager {
     });
 
     if (useReranking && docs.length > 1) {
-      const rer = await this.rerankDocuments(query, docs, modelKey, threshold);
+      const rer = await this.rerankDocuments(query, docs, threshold);
       return { documents: rer.slice(0, topK).map((r) => r.document), rerankingResults: rer.slice(0, topK) };
     }
     return { documents: docs.slice(0, topK), rerankingResults: [] as RerankingResult[] };
   }
+
   knowledgeBaseSearch(query: string, topK = 5, filters?: Record<string, unknown>, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
-    return this.searchCore(MemoryManager.NS_KB, query, { topK, filters, useReranking, modelKey, threshold });
+    return this.searchCore(MemoryManager.NS_KB, query, { topK, filters, useReranking, threshold });
   }
+
   vectorSearch(query: string, documentNamespace: string, filterUserMessages: boolean, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
     const filters = filterUserMessages && this.cfg.enableMetadataFiltering ? { userMsg: true } : undefined;
-    return this.searchCore(documentNamespace, query, { topK: 10, filters, useReranking, modelKey, threshold });
+    return this.searchCore(documentNamespace, query, { topK: 10, filters, useReranking, threshold });
   }
+
   searchSimilarConversations(query: string, userId: string, topK = 3, useReranking?: boolean, modelKey?: ModelKey, threshold?: number) {
     const ns = `${MemoryManager.NS_CHAT_PREFIX}-${userId}`;
     const filters = this.cfg.enableMetadataFiltering ? { userId } : undefined;
-    return this.searchCore(ns, query, { topK, filters, useReranking, modelKey, threshold });
+    return this.searchCore(ns, query, { topK, filters, useReranking, threshold });
   }
 
-  /* ---------- reranking (via Groq) ---------- */
-  async rerankDocuments(
-    query: string,
-    documents: Document[],
-    modelKey: ModelKey = "llama-3.1-8b-instant",
-    threshold = 0.5
-  ): Promise<RerankingResult[]> {
-    if (!documents.length) return [];
-    try {
-      const modelName = toGroqModel(String(modelKey), { purpose: "rerank" });
-      const model = new ChatGroq({
-        apiKey: process.env.GROQ_API_KEY,
-        model: modelName,
-        temperature: 0.1,
-        maxTokens: 1024,
-      });
 
-      const results: RerankingResult[] = [];
-      const B = 5;
+async rerankDocuments(
+  query: string,
+  documents: Document[],
+  threshold = 0.5
+): Promise<RerankingResult[]> {
+  if (!documents.length) return [];
 
-      for (let i = 0; i < documents.length; i += B) {
-        const batch = documents.slice(i, i + B);
-        const prompt =
-          `Query: "${query}"\n\nRate each document 0.0-1.0\n` +
-          batch
-            .map((doc, j) => `Document ${i + j + 1}:\n${String(doc.pageContent).slice(0, 700)}\n`)
-            .join("\n") +
-          `\nReply with lines "Document N: 0.X"`;
+  const client = new InferenceClient(process.env.HUGGINGFACEHUB_API_KEY);
 
-        const resp = await model.invoke([new SystemMessage(SYSTEM_PROMPTS.reranking), new HumanMessage(prompt)]);
-        const scores = String(resp.content)
-          .trim()
-          .split(/\n+/)
-          .map((l) => parseFloat(l.split(":").pop()!.trim()))
-          .filter((n) => !Number.isNaN(n));
+  // sentence similarity model (bi-encoder). change via env if you like.
+  const simModel = "sentence-transformers/all-mpnet-base-v2";
 
-        batch.forEach((doc, j) => {
-          const s = scores[j] ?? 0.5;
-          if (s >= threshold) {
-            results.push({ document: doc, relevanceScore: s, originalRank: i + j, newRank: -1 });
-          }
-        });
-      }
+  // keep requests small & fast
+  const MAX_CHARS = 4096;
+  const texts = documents.map((d) => String(d.pageContent || "").slice(0, MAX_CHARS));
 
-      results.sort((a, b) => b.relevanceScore - a.relevanceScore);
-      results.forEach((r, idx) => (r.newRank = idx));
-      return results;
-    } catch (e) {
-      console.warn("Reranking failed; returning neutral ranks", e);
-      return documents.map((d, i) => ({ document: d, relevanceScore: 0.5, originalRank: i, newRank: i }));
-    }
+  try {
+    const sims = await client.sentenceSimilarity({
+      model: simModel,
+      inputs: { source_sentence: query, sentences: texts },
+    });
+
+    const results: RerankingResult[] = documents.map((doc, i) => ({
+      document: doc,
+      relevanceScore: normalizeToUnitInterval(Number(sims?.[i] ?? 0)),
+      originalRank: i,
+      newRank: -1,
+    }));
+
+    const filtered = results
+      .filter((r) => r.relevanceScore >= threshold)
+      .sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+    filtered.forEach((r, i) => (r.newRank = i));
+    return filtered;
+  } catch (e) {
+    console.warn("Hugging Face sentenceSimilarity failed:", (e as Error).message);
+    // neutral fallback: preserve order
+    return documents.map((d, i) => ({
+      document: d,
+      relevanceScore: 0.5,
+      originalRank: i,
+      newRank: i,
+    }));
   }
+}
+
+
+
 
   /* ---------- chat history (Redis + vectors) ---------- */
   private docKey(k: DocumentKey) {
@@ -2020,7 +2024,6 @@ Raw Data Available: ${JSON.stringify(data.slice(0, 10), null, 2)}`;
       const results = await this.mm!.rerankDocuments(
         query,
         docs,
-        this.cfg.modelKey as ModelKey,
         threshold ?? this.cfg.rerankingThreshold
       );
 
