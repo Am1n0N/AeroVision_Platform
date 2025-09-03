@@ -2,7 +2,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleAuthAndRateLimit, createErrorResponse } from "@/lib/agent";
 import prismadb from "@/lib/prismadb";
-import { DEFAULT_EVALUATION_DATASET } from "@/lib/eval/engine";
 
 /* ----------------------------- Helpers ----------------------------- */
 const isValidItem = (item: any) =>
@@ -16,7 +15,7 @@ const isValidItem = (item: any) =>
 const validateDataset = (ds: any) =>
   Array.isArray(ds) && ds.every(isValidItem);
 
-const parseBool = (v: string | null) => v === "true";
+
 
 /* ------------------------------- GET --------------------------------
  * Returns a single dataset by id. Supports:
@@ -124,7 +123,7 @@ export async function PUT(
     if (description !== undefined) updateData.description = description;
     if (isActive !== undefined) updateData.isActive = !!isActive;
 
-    let parsed: any[] | null = null;
+
     if (dataset !== undefined) {
       if (!validateDataset(dataset)) {
         return NextResponse.json(
@@ -132,9 +131,8 @@ export async function PUT(
           { status: 400 }
         );
       }
-      parsed = dataset;
-      updateData.dataset = JSON.stringify(parsed);
-      updateData.itemCount = parsed.length;
+      updateData.dataset = JSON.stringify(dataset);
+      updateData.itemCount = dataset.length ;
     }
 
     const updated = await prismadb.evaluationDataset.update({
@@ -151,7 +149,7 @@ export async function PUT(
     });
 
     // Optional: rebuild Knowledge Base entries from items
-    if (syncKB && parsed) {
+    if (syncKB && dataset) {
       try {
         await prismadb.knowledgeBaseEntry.deleteMany({
           where: {
@@ -160,7 +158,7 @@ export async function PUT(
           },
         });
 
-        const kbEntries = parsed.map((item: any) => ({
+        const kbEntries = dataset.map((item: any) => ({
           title: `Evaluation Case: ${item.id}`,
           content: `Question: ${item.question}\n\nGround Truth: ${item.groundTruth}\n\nContext: ${
             item.context || ""
